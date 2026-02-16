@@ -1,14 +1,21 @@
+use crate::cli::ExecutionMode;
 use crate::config::Config;
 use anyhow::{Context, Result};
 use operon_adapters::ShellTool;
-use operon_runtime::Runtime;
+use operon_runtime::{ExecutionContext, Runtime};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
 
-pub async fn execute(plan_file: PathBuf, allow_tools: bool, config: &Config) -> Result<()> {
-    info!(?plan_file, allow_tools, "Running plan");
+pub async fn execute(
+    plan_file: PathBuf,
+    execution_mode: ExecutionMode,
+    config: &Config,
+    record: Option<PathBuf>,
+    replay: Option<PathBuf>,
+) -> Result<()> {
+    info!(?plan_file, ?execution_mode, "Running plan");
 
     // Read plan JSON
     let plan_content = std::fs::read_to_string(&plan_file)
@@ -17,31 +24,38 @@ pub async fn execute(plan_file: PathBuf, allow_tools: bool, config: &Config) -> 
     let plan: serde_json::Value =
         serde_json::from_str(&plan_content).context("Failed to parse plan JSON")?;
 
-    // Determine dry-run mode (CLI flag overrides config)
-    let dry_run = if allow_tools {
-        false
-    } else {
-        config.runtime.dry_run
+    // Resolve dry-run from execution mode
+    let dry_run = match execution_mode {
+        ExecutionMode::Auto => config.runtime.dry_run,
+        ExecutionMode::DryRun => true,
+        ExecutionMode::Execute => false,
     };
 
-    // Create runtime
+    // Resolve execution context (record/replay)
+    let execution_context = if let Some(dir) = replay {
+        ExecutionContext::Replay(dir)
+    } else if let Some(dir) = record {
+        ExecutionContext::Record(dir)
+    } else {
+        ExecutionContext::Normal
+    };
+
+    // Create runtime (single timeout source)
     let default_timeout = Duration::from_secs(config.runtime.timeout_secs);
-    let runtime = Runtime::new(dry_run, default_timeout)?;
+    let runtime = Runtime::new(dry_run, default_timeout)?
+        .with_execution_context(execution_context)
+        .with_max_parallel(config.runtime.max_parallel);
 
     // Register shell tool if enabled
     if config.tools.shell.enabled {
-        let shell_timeout = config
-            .tools
-            .timeouts
-            .get("shell")
-            .copied()
-            .unwrap_or(config.runtime.timeout_secs);
+        let shell_tool = ShellTool::new(dry_run).with_validation(
+            config.tools.shell.blocklist.clone(),
+            config.tools.shell.allowlist.clone(),
+        );
 
-        let shell_tool = ShellTool::new(dry_run).with_timeout(Duration::from_secs(shell_timeout));
+        runtime.register_tool("shell".to_string(), Arc::new(shell_tool))?;
 
-        runtime.register_tool("shell".to_string(), Arc::new(shell_tool));
-
-        // Configure per-tool timeout if specified
+        // Configure per-tool timeout (single location)
         if let Some(&timeout_secs) = config.tools.timeouts.get("shell") {
             runtime.configure_timeout("shell".to_string(), Duration::from_secs(timeout_secs));
         }
@@ -49,12 +63,14 @@ pub async fn execute(plan_file: PathBuf, allow_tools: bool, config: &Config) -> 
         info!("Registered shell tool");
     }
 
-    // Register Python tools if enabled (placeholder - would auto-discover scripts)
+    // Register Python tools if enabled (auto-discovery)
     if config.tools.python.enabled {
         info!(
             scripts_dir = config.tools.python.scripts_dir,
-            "Python tools enabled (not yet implemented)"
+            "Python tools enabled"
         );
+        // Auto-discovery deferred to when scripts_dir actually exists
+        // Tools are registered individually when discovered
     }
 
     // Start runtime

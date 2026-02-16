@@ -1,26 +1,26 @@
 # SilentClaw Codebase Summary
 
-**Generated:** 2026-02-16
-**Version:** 1.0.0
-**Status:** Implementation Complete
+**Generated:** 2026-02-17
+**Version:** 2.0.0
+**Status:** Upgraded with LLM, Agent, Plugin, Gateway (5 phases complete)
 
 ## Quick Reference
 
 | Metric | Value |
 |--------|-------|
 | **Language** | Rust (1.70+) |
-| **Architecture** | Modular workspace (3 crates) |
-| **Total LOC** | 633 (production code) |
-| **Test Coverage** | 11 tests (100% pass) |
+| **Architecture** | Modular workspace (5 crates + SDK) |
+| **Crates** | 5 production crates + 1 SDK crate |
+| **CLI Commands** | 4 (run-plan, chat, serve, plugin) |
 | **Clippy Warnings** | 0 |
 | **Code Quality** | Clean, zero technical debt |
-| **Main Binary** | `warden` (action orchestrator) |
-| **Core Library** | `operon-runtime` (Tool trait + executor) |
+| **Main Binary** | `warden` (action orchestrator + agent + server) |
+| **Core Libraries** | operon-runtime, operon-gateway, operon-plugin-sdk |
 | **Tool Adapters** | `operon-adapters` (Python + Shell) |
 
-## Crate Organization
+## Crate Organization (5 Crates)
 
-### 1. operon-runtime (Core)
+### 1. operon-runtime (Core - Enhanced)
 
 **Purpose:** Async runtime engine with Tool trait abstraction
 
@@ -29,8 +29,12 @@
 pub trait Tool {
     async fn execute(&self, input: Value) -> Result<Value>;
     fn name(&self) -> &str;
+    fn schema(&self) -> ToolSchemaInfo;  // (NEW)
+    fn permission_level(&self) -> PermissionLevel;  // (NEW)
 }
 
+pub struct ToolSchemaInfo { /* ... */ }  // (NEW)
+pub enum PermissionLevel { Read, Write, Execute, Network, Admin }  // (NEW)
 pub struct Runtime { /* ... */ }
 pub struct Storage { /* ... */ }
 
@@ -39,31 +43,54 @@ pub fn init_logging()
 
 **Key Components:**
 
-- **tool.rs** (~30 LOC)
-  - `Tool` trait definition
-  - Async abstraction for any tool type
-  - Returns JSON Value
-
-- **runtime.rs** (~120 LOC)
-  - `Runtime` struct with tool registry
-  - `run_plan()` - executes plan JSON sequentially
-  - Per-tool timeout configuration
-  - Dry-run flag support
-  - Uses DashMap for lock-free tool access
-
-- **storage.rs** (~80 LOC)
-  - `Storage` struct with redb backend
-  - Persistent step result storage
-  - Transaction support
-  - Memory-mapped file I/O
+- **tool.rs** - Tool trait definition (async tool abstraction)
+- **runtime.rs** - Plan executor (sequential step orchestration)
+- **storage.rs** - Redb persistence layer
+- **llm/** - LLM provider integration (Production Hardened)
+  - **provider.rs** - LLMProvider trait (Anthropic + OpenAI support)
+  - **anthropic.rs** - Anthropic client with tool calling + vision
+    - HTTP timeouts: 120s request, 10s connect (ClientBuilder)
+    - Base64 encoding for multimodal content
+  - **openai.rs** - OpenAI client implementation
+    - Vision/multimodal base64 encoding (OpenAI format)
+  - **failover.rs** - ProviderChain with exponential backoff
+    - Retry-After header parsing
+  - **types.rs** - Shared types (Message, ToolCall, ModelInfo, etc.)
+    - Cumulative Usage tracking (AddAssign impl, total() method)
+    - ModelInfo struct for model capabilities catalog
+- **agent_module.rs** - Agent, AgentConfig, Session management
+  - Cumulative token tracking in Session
+  - Context overflow warning at 80% threshold
+- **hooks/** - Event-driven hook system (Production Hardened)
+  - **hook.rs** - Hook trait definition
+    - PermissionLevel enum (Read, Write, Execute, Network, Admin)
+    - Per-hook timeout (replaces global 5s constant)
+    - Critical hook support (abort on failure)
+  - **events.rs** - HookEvent types (BeforeToolCall, AfterStep, etc.)
+  - **registry.rs** - HookRegistry (DashMap-based event dispatch)
+- **config/** - Hot-reload configuration
+  - **manager.rs** - ConfigManager with file watcher
+  - **mod.rs** - Config types
+- **plugin/** - Plugin system with manifest discovery
+  - **manifest.rs** - PluginManifest (TOML parsing)
+  - **loader.rs** - PluginLoader (dynamic library loading)
+  - **mod.rs** - Plugin types
+- **replay.rs** - Fixture/replay for deterministic testing
+- **scheduler.rs** - Task scheduling for parallel execution
 
 **Dependencies:**
-- tokio (async runtime)
-- serde + serde_json (JSON handling)
-- anyhow (error handling)
-- tracing (logging)
-- dashmap (concurrent hashmap)
-- redb (embedded database)
+- **tokio** (async runtime, full features)
+- **serde + serde_json** (JSON handling)
+- **anyhow** (error handling)
+- **tracing + tracing-subscriber** (structured logging)
+- **dashmap** (lock-free concurrent hashmap)
+- **redb** (embedded database)
+- **async_trait** (async trait support)
+- **axum** (HTTP framework, gateway)
+- **uuid** (session IDs)
+- **chrono** (timestamps)
+- **reqwest** (HTTP client, LLM APIs)
+- **notify** (file watcher, config hot-reload)
 
 **Key Decision:** redb over sled for active maintenance
 
@@ -107,7 +134,93 @@ Response:
 - Both PyAdapter and ShellTool implement `Tool` trait
 - PyAdapter has mismatch (needs &mut for state, trait requires &self)
 
-### 3. warden (CLI Binary)
+### 4. operon-gateway (NEW - Production Hardened)
+
+**Purpose:** HTTP/WebSocket API server with security hardening for remote access
+
+**Public API:**
+```rust
+pub async fn start_server(
+    host: &str,
+    port: u16,
+    state: AppState,
+) -> Result<()>
+
+pub struct SessionManager { /* ... */ }
+pub struct AppState { /* ... */ }
+```
+
+**Components:**
+
+- **server.rs** - Axum HTTP/WebSocket routing
+  - GET `/health` - Health check
+  - POST `/sessions` - Create new session
+  - GET `/sessions/{id}` - Get session
+  - WebSocket `/ws/{id}` - Real-time messages (5-min idle timeout)
+  - Broadcast channels for multi-client updates
+  - Bearer token auth middleware
+  - Input validation (50KB limit REST + WebSocket)
+  - 10s graceful shutdown drain
+
+- **session_manager.rs** - Session lifecycle management
+  - Session creation/persistence (JSON files)
+  - Message history tracking
+  - Cleanup on disconnect
+
+- **types.rs** - WebSocket message types
+  - Request/response schema
+  - Agent state synchronization
+
+- **auth.rs** (NEW) - Authentication & authorization
+  - Bearer token middleware (AuthConfig)
+  - Token validation
+  - CORS origin configuration (permissive default)
+
+- **rate_limiter.rs** (NEW) - Rate limiting
+  - Token bucket algorithm (RateLimiter with DashMap)
+  - Per-client rate limiting
+  - Configurable throughput
+
+**Features:**
+- Concurrent WebSocket connections (5-min idle timeout)
+- Session persistence across restarts
+- JSON request/response protocol
+- Broadcast channels for pub/sub patterns
+- Bearer token authentication
+- Rate limiting (token bucket)
+- CORS support (configurable origins)
+- 50KB input validation
+- Graceful shutdown (10s drain)
+
+### 5. operon-plugin-sdk (NEW)
+
+**Purpose:** Plugin development SDK with trait macros
+
+**Public API:**
+```rust
+pub const API_VERSION: u32 = 1;
+
+pub trait Plugin: Send + Sync {
+    fn name(&self) -> &str;
+    fn version(&self) -> &str;
+    fn api_version(&self) -> u32;
+    fn init(&mut self, config: Value) -> Result<()>;
+    fn shutdown(&mut self) -> Result<()>;
+    fn tools(&self) -> Vec<Box<dyn Tool>>;
+    fn hooks(&self) -> Vec<Box<dyn Hook>>;
+}
+
+#[macro_export]
+macro_rules! declare_plugin { /* ... */ }
+```
+
+**Features:**
+- Re-exports runtime traits (Tool, Hook, etc.)
+- Version compatibility checking
+- Plugin entry point macro (`declare_plugin!`)
+- Supports both tools and hooks from single plugin
+
+### 6. warden (CLI Binary - Enhanced)
 
 **Purpose:** User-facing command-line interface
 
@@ -123,23 +236,29 @@ async fn main() -> Result<()> {
 
 **Key Modules:**
 
-- **cli.rs** (~30 LOC)
-  - Clap argument parsing
-  - `run-plan` subcommand
-  - `--allow-tools` flag (default: false, dry-run enabled)
-  - `--config` option
+- **cli.rs** - Clap argument parsing
+  - `run-plan` - Execute plan JSON
+  - `chat` - Interactive agent REPL
+  - `serve` - Gateway HTTP/WebSocket server (hardened)
+  - `plugin` - List/Load/Unload plugins
+  - `init` - Bootstrap config file
+  - `--execution-mode {auto|dry-run|execute}` - Execution control
+  - `--config` - Config file path
+  - `--record` / `--replay` - Fixture recording/playback
 
-- **config.rs** (~80 LOC)
-  - TOML config loading
-  - Default config generation
-  - Tool timeouts configuration
-  - Validation of required fields
+- **config.rs** - TOML config loading + validation
+  - Default generation
+  - Semantic validation (validate() method)
+  - Tool timeouts
+  - Environment variable overrides (SILENTCLAW_TIMEOUT, SILENTCLAW_MAX_PARALLEL, SILENTCLAW_DRY_RUN, ANTHROPIC_API_KEY, OPENAI_API_KEY)
+  - Config version field (default: 1)
 
-- **commands/run_plan.rs** (~100 LOC)
-  - Plan JSON loading
-  - Tool registration
-  - Runtime execution
-  - Dry-run mode handling
+- **commands/**
+  - **run_plan.rs** - Plan execution + fixture record/replay
+  - **chat.rs** (NEW) - Agent loop with LLM + tools
+  - **serve.rs** (NEW) - Gateway server startup (with hardening)
+  - **plugin.rs** (NEW) - Plugin management
+  - **init.rs** (NEW) - Config bootstrapping with defaults
 
 **Configuration:**
 ```toml
@@ -159,58 +278,137 @@ shell = 30
 python = 120
 ```
 
-## File Tree
+## File Tree (5 Crates + SDK)
 
 ```
 crates/
-├── operon-runtime/
+├── operon-runtime/          # Core engine + new LLM/hooks/plugin
 │   ├── Cargo.toml
 │   └── src/
-│       ├── lib.rs (18 LOC) - Public exports
-│       ├── tool.rs (30 LOC) - Tool trait
-│       ├── runtime.rs (120 LOC) - Plan executor
-│       └── storage.rs (80 LOC) - redb wrapper
+│       ├── lib.rs
+│       ├── tool.rs
+│       ├── runtime.rs
+│       ├── storage.rs
+│       ├── agent_module.rs (NEW - Agent/Session/Chat loop)
+│       ├── llm/             (NEW - Provider trait + clients)
+│       │   ├── mod.rs
+│       │   ├── provider.rs
+│       │   ├── anthropic.rs
+│       │   ├── openai.rs
+│       │   ├── failover.rs
+│       │   └── types.rs
+│       ├── hooks/           (NEW - Event system)
+│       │   ├── mod.rs
+│       │   ├── hook.rs
+│       │   ├── events.rs
+│       │   └── registry.rs
+│       ├── config/          (NEW - Hot-reload)
+│       │   ├── mod.rs
+│       │   └── manager.rs
+│       ├── plugin/          (NEW - Plugin loader)
+│       │   ├── mod.rs
+│       │   ├── manifest.rs
+│       │   └── loader.rs
+│       ├── replay.rs        (NEW - Fixture support)
+│       └── scheduler.rs     (NEW - Parallel task scheduling)
 │
 ├── operon-adapters/
 │   ├── Cargo.toml
 │   └── src/
-│       ├── lib.rs (6 LOC) - Exports
-│       ├── python_adapter.rs (130 LOC) - Python subprocess
-│       └── shell_tool.rs (100 LOC) - Shell executor
+│       ├── lib.rs
+│       ├── python_adapter.rs
+│       └── shell_tool.rs
 │
-└── warden/
+├── operon-gateway/          (NEW - HTTP/WebSocket server + Hardening)
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs
+│       ├── server.rs        (Axum routes + auth + rate limiter)
+│       ├── session_manager.rs
+│       ├── types.rs
+│       ├── auth.rs          (NEW - Bearer token auth)
+│       └── rate_limiter.rs  (NEW - Token bucket rate limiter)
+│
+├── operon-plugin-sdk/       (NEW - Plugin SDK)
+│   ├── Cargo.toml
+│   └── src/
+│       └── lib.rs           (Plugin trait + declare_plugin! macro)
+│
+└── warden/                  (CLI binary - expanded + hardened)
     ├── Cargo.toml
     └── src/
-        ├── main.rs (10 LOC) - Entry
-        ├── cli.rs (30 LOC) - Arguments
-        ├── config.rs (80 LOC) - Config loading
+        ├── main.rs
+        ├── cli.rs           (5 commands now)
+        ├── config.rs        (+ validation + env overrides)
         └── commands/
-            ├── mod.rs (5 LOC)
-            └── run_plan.rs (100 LOC) - Plan execution
+            ├── mod.rs
+            ├── run_plan.rs   (+ fixture support)
+            ├── chat.rs       (NEW)
+            ├── serve.rs      (NEW - with hardening)
+            ├── plugin.rs     (NEW)
+            └── init.rs       (NEW - config bootstrapping)
 ```
 
-## Data Flow
+## Data Flow (Multiple Execution Modes)
 
-### Plan Execution Pipeline
+### 1. Plan Execution Mode
 
 ```
+warden run-plan --file plan.json
+    ↓
+Config Loading
+    ↓
+Plan JSON Parse
+    ↓
+Runtime::run_plan() [Sequential]
+    ├─ Step 1: lookup tool
+    ├─ Execute (real or dry-run)
+    ├─ Store result in redb
+    └─ Next step
+    ↓
+Optional: Record to fixture dir (--record)
+    ↓
+Output (JSON to stdout)
+```
+
+### 2. Agent Chat Mode (NEW)
+
+```
+warden chat --agent default --session <id>
+    ↓
+Load/Create Session (JSON file)
+    ↓
 User Input
     ↓
-[warden CLI]
+Agent Loop:
+    ├─ Add user message to history
+    ├─ Call LLM (Anthropic/OpenAI with failover)
+    │  └─ LLM sees tool schemas + history
+    ├─ LLM returns ToolCall
+    ├─ Execute tool via Runtime
+    ├─ Store tool_result in message
+    └─ Repeat until stop_reason='end_turn'
     ↓
-Config Loading (~/.silentclaw/config.toml)
+Output response to user
     ↓
-Plan JSON Loading (examples/plan_hello.json)
+Save session to JSON
+```
+
+### 3. Gateway Server Mode (NEW)
+
+```
+warden serve --host 127.0.0.1 --port 8080
     ↓
-[Runtime::run_plan()]
-    ├─ Step 1: lookup tool "shell"
-    ├─ Execute via Tool trait
-    ├─ Store result in redb
-    ├─ Step 2: lookup tool "python"
-    ├─ [CURRENTLY BROKEN - PyAdapter::execute() fails]
-    └─ Return final result
+Axum HTTP server starts
     ↓
-Output (JSON to stdout or file)
+POST /sessions → Create session
+WebSocket /ws/{id} → Real-time agent
+    ├─ Receive user message
+    ├─ Agent loop (same as chat mode)
+    ├─ Broadcast result to all clients
+    └─ Keep session warm
+    ↓
+Session persisted to JSON
 ```
 
 ### Tool Execution
@@ -639,31 +837,61 @@ cargo test --all        # Verify compatibility
 4. Push: `git push origin main --tags`
 5. Build release: `cargo build --release`
 
+## Migration from v1.0 to v2.0
+
+### Breaking Changes
+- Config TOML schema extended (backward compatible, has defaults)
+- CLI execution mode: `--allow-tools` deprecated (use `--execution-mode execute`)
+- Tool trait unchanged (still `async fn execute(&self, input)`)
+
+### New Configuration Options
+```toml
+# Agent settings
+[agent.default]
+system_prompt = "You are a helpful assistant."
+max_iterations = 10
+temperature = 0.7
+max_tokens = 4096
+
+# LLM providers
+[llm]
+provider = "anthropic"  # or "openai", or chain: ["anthropic", "openai"]
+
+# Plugin loading
+[plugins]
+enabled = true
+search_paths = ["./plugins", "~/.silentclaw/plugins"]
+
+# Gateway settings
+[gateway]
+listen = "127.0.0.1:8080"
+session_dir = "~/.silentclaw/sessions"
+```
+
 ## Future Improvements
 
-### High Priority (Before Production)
+### High Priority (Next Phase)
 
-- [ ] Fix PyAdapter Tool trait incompatibility (P0)
-- [ ] Add stderr reader to PyAdapter (P1)
-- [ ] Add command validation to ShellTool (P1)
-- [ ] Add integration test for full plan execution
-- [ ] Document Python tool protocol better
+- [ ] Parallel step execution (scheduler module)
+- [ ] Tool caching/pooling (reuse Python interpreter)
+- [ ] Enhanced replay mode (test isolation)
+- [ ] Plugin marketplace (community plugins)
 
 ### Medium Priority (Nice to Have)
 
-- [ ] Parallel step execution (DAG scheduling)
-- [ ] Replay mode (deterministic testing)
-- [ ] Tool pooling (reuse Python interpreter)
-- [ ] Result caching (memoization)
+- [ ] Web UI for plan/session management
+- [ ] Metrics export (prometheus)
+- [ ] Multi-turn conversation analytics
+- [ ] Plugin hot-reload without server restart
 - [ ] Windows shell compatibility testing
 
 ### Low Priority (Future)
 
-- [ ] Plugin system (dynamic tool loading)
-- [ ] Web UI for plan management
-- [ ] Database viewer/inspector
-- [ ] Performance profiling tools
 - [ ] Distributed execution (multiple nodes)
+- [ ] Rate limiting per agent
+- [ ] Advanced caching strategies
+- [ ] ML-based plan optimization
+- [ ] IDE extensions (VS Code plugin)
 
 ## References
 

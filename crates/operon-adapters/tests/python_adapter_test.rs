@@ -4,7 +4,7 @@ use serde_json::json;
 #[tokio::test]
 #[ignore] // Requires echo_tool.py to be available
 async fn test_python_adapter_roundtrip() {
-    let mut adapter = PyAdapter::spawn("tools/python_examples/echo_tool.py")
+    let adapter = PyAdapter::spawn("tools/python_examples/echo_tool.py")
         .await
         .unwrap();
 
@@ -25,18 +25,28 @@ import sys
 while True:
     time.sleep(1)
 "#;
-
     // Would need to create temp file and spawn
     // Placeholder for timeout test
 }
 
+// Phase 2: Path validation — nonexistent script fails fast
 #[tokio::test]
-#[ignore] // Python interpreter doesn't fail on spawn, only on execution
 async fn test_python_adapter_spawn_nonexistent() {
     let result = PyAdapter::spawn("nonexistent_script.py").await;
-    // Note: spawn() succeeds because tokio::process::Command::spawn() only validates
-    // the executable (python3) exists, not the script file. Python will fail when it
-    // tries to open the file, but that happens after spawn completes.
-    // This test is kept as documentation of this behavior.
     assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("not found"),
+        "Expected 'not found' error, got: {}",
+        err_msg
+    );
+}
+
+// Phase 2: Path validation — directory path rejected
+#[tokio::test]
+async fn test_python_adapter_spawn_directory_rejected() {
+    let result = PyAdapter::spawn(".").await;
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("not a file"));
 }

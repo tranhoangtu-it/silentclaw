@@ -1,0 +1,12 @@
+[package]
+name = "operon-plugin-sdk"
+version = "0.1.0"
+edition = "2021"
+description = "SDK for developing SilentClaw plugins"
+
+[dependencies]
+operon-runtime = { path = "../operon-runtime" }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = "0.1"

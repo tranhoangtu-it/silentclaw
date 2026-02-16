@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/operon-runtime", "crates/operon-adapters", "crates/warden"]
+members = ["crates/operon-runtime", "crates/operon-adapters", "crates/operon-gateway", "crates/operon-plugin-sdk", "crates/warden"]
 resolver = "2"
 
 [workspace.dependencies]

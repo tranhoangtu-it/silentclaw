@@ -1,79 +1,144 @@
 # SilentClaw
 
-Lightweight local LLM-driven action orchestrator — Rust rewrite of OpenClaw focused on speed, reliability, and full system control.
+**SilentClaw** is a lightweight, high-performance local LLM action orchestrator written in Rust. It serves as a robust successor to OpenClaw, engineered for reliability, speed, and strict system control.
 
-## Overview
+SilentClaw preserves the semantic runtime loop of its predecessor but rebuilds the engine from the ground up to offer:
+*   **Safe-by-Default Execution:** Strict dry-run modes and permission controls.
+*   **High Concurrency:** Async-first runtime built on `tokio` for parallel tool execution.
+*   **Language Agnostic Tools:** seamless Python integration via a JSON-over-stdio adapter protocol.
+*   **Observability:** Structured JSON logging via `tracing` for production-grade monitoring.
 
-SilentClaw maintains OpenClaw's runtime loop semantics:
+---
+
+## 🏛️ Architecture
+
+SilentClaw is composed of modular crates designed for separation of concerns:
+
+```mermaid
+graph TD
+    CLI[Warden CLI] -->|Config & Commands| Runtime[Operon Runtime]
+    Runtime -->|Orchestrates| Tools
+    Tools -->|Spawns| PyAdapter[Python Adapter]
+    Tools -->|Executes| Shell[Shell Tool]
+    PyAdapter <-->|JSON stdio| PyScript[Python Script]
+    Runtime -->|Persists| Storage[Redb Storage]
 ```
-prompt → LLM → planner → tool selection → executor → observe → feedback
-```
 
-**Key Features:**
-- 🦀 **Rust Performance:** Async runtime with tokio for concurrent tool execution
-- 🐍 **Python Parity:** JSON-over-stdio adapter maintains compatibility with existing tools
-- 🔒 **Sandbox Default:** Dry-run mode prevents accidental destructive operations
-- 📊 **Structured Logs:** JSON logging via tracing-subscriber for observability
-- 🎯 **Replay Mode:** Deterministic testing with fixture playback (coming soon)
-- ⚙️ **Per-Tool Timeouts:** Configurable timeout for each tool type
+*   **`warden`**: The command-line interface entry point. Handles configuration parsing (`config.toml`), argument handling (CLAP), and initializes the runtime.
+*   **`operon-runtime`**: The core execution engine. Defines the async `Tool` trait, manages the execution loop, handles timeouts, and ensures thread safety. Uses `redb` for persistent storage (e.g., memory/history - *future feature*).
+*   **`operon-adapters`**: Provides implementations for external tools.
+    *   **Python Adapter**: Runs Python scripts as persistent subprocesses, communicating via a strict JSON line-based protocol.
+    *   **Shell Tool**: Safely executes system shell commands with allow/block list support.
 
-## Quickstart
+## 🚀 Quick Start
 
 ### Prerequisites
-- Rust 1.70+ (stable)
-- Python 3.8+ (for Python tools)
+*   **Rust**: 1.70+ (Stable)
+*   **Python**: 3.8+ (for Python tools)
 
-### Build & Run
+### Installation
+
+Clone the repository and build the release binary:
 
 ```bash
-# Clone repository
-git clone https://github.com/<GITHUB_USER>/silentclaw.git
+git clone https://github.com/tranhoangtu-it/silentclaw.git
 cd silentclaw
-
-# Build release binary
 cargo build --release
+```
 
-# Run example plan (dry-run mode)
+The binary will be available at `./target/release/warden`.
+
+### Basic Usage
+
+Run a plan file (usually JSON) containing the task definition:
+
+```bash
+# Default (defaults to "Auto" mode, usually Dry Run based on config)
 ./target/release/warden run-plan --file examples/plan_hello.json
 
-# Run with real execution
-./target/release/warden run-plan --file examples/plan_hello.json --allow-tools
+# Force Dry Run (No side effects, useful for testing)
+./target/release/warden run-plan --file examples/plan_hello.json --execution-mode dry-run
 
-# Enable structured logging
+# Force Execution (REAL execution of tools)
+./target/release/warden run-plan --file examples/plan_hello.json --execution-mode execute
+```
+
+### Logging
+
+Enable structured logs for debugging or monitoring:
+
+```bash
 RUST_LOG=info ./target/release/warden run-plan --file examples/plan_hello.json
 ```
 
-## Architecture
+## ⚙️ Configuration
 
+SilentClaw uses a TOML configuration file, typically located at `~/.silentclaw/config.toml` or passed via `--config`.
+
+```toml
+[runtime]
+# Safety first: default to dry-run to prevent accidental damage.
+dry_run = true
+# Global timeout for tool execution (in seconds).
+timeout_secs = 60
+# Max concurrent tools allowed (for parallel execution plans).
+max_parallel = 4
+
+[tools.shell]
+enabled = true
+# Safety: Block dangerous commands.
+blocklist = ["rm -rf", "mkfs", ":(){ :|:& };:"]
+# Optional: Only allow specific commands (if empty, allows all except blocklist).
+allowlist = []
+
+[tools.python]
+enabled = true
+# Directory to scan for auto-discoverable .py tools.
+scripts_dir = "./tools/python_examples"
+
+[tools.timeouts]
+# Specific overrides per tool type.
+shell = 30
+python = 120
 ```
-silentclaw/
-├── crates/
-│   ├── operon-runtime/    # Core async runtime + Tool trait
-│   ├── operon-adapters/   # Python adapter + shell tool
-│   └── warden/            # CLI binary
-├── examples/              # Demo plan JSON files
-└── tools/                 # Python example tools
+
+## 🔌 Developing Tools
+
+### Python Tools
+SilentClaw supports Python tools via the `PyAdapter`. Your Python script must read JSON requests from `stdin` and write JSON responses to `stdout`.
+
+**Protocol:**
+1.  **Request (from SilentClaw):** `{"id": 1, "method": "function_name", "params": {...}}`
+2.  **Response (from Script):** `{"id": 1, "result": ...} ` OR `{"id": 1, "error": "Error message"}`
+
+**Example Script (`my_tool.py`):**
+```python
+import sys
+import json
+
+def handle_request(line):
+    req = json.loads(line)
+    # Process logic...
+    response = {"id": req["id"], "result": "Success"}
+    print(json.dumps(response))
+    sys.stdout.flush()
+
+if __name__ == "__main__":
+    for line in sys.stdin:
+        handle_request(line)
 ```
 
-**Components:**
-- **operon-runtime:** Async Tool trait (associated types), Runtime orchestrator, redb storage
-- **operon-adapters:** Python subprocess adapter (JSON-over-stdio), shell tool
-- **warden:** CLI with run-plan command, TOML config, configurable dry-run mode
+## 🛠️ Development & Contributing
 
-## Development
-
-### Format Code
+### Build & Test
 ```bash
+# Format code
 cargo fmt
-```
 
-### Lint
-```bash
+# Lint code
 cargo clippy --all -- -D warnings
-```
 
-### Run Tests
-```bash
+# Run unit and integration tests
 cargo test --all
 ```
 
@@ -82,43 +147,6 @@ cargo test --all
 cargo doc --open
 ```
 
-## Configuration
+## ⚖️ License
 
-Create `~/.silentclaw/config.toml`:
-```toml
-[runtime]
-dry_run = true          # Safe by default
-timeout_secs = 60       # Default timeout
-
-[tools.shell]
-enabled = true
-
-[tools.python]
-enabled = true
-scripts_dir = "./tools/python_examples"
-
-# Per-tool timeout overrides
-[tools.timeouts]
-shell = 30
-python = 120
-```
-
-## Migrating from OpenClaw
-
-```bash
-# Convert YAML config to TOML (skeleton implementation)
-cargo run --bin migrate_openclaw_config -- --input ~/.openclaw/config.yaml --output ~/.silentclaw/config.toml
-```
-
-## Technical Decisions
-
-Based on validation session, SilentClaw implements:
-- **Tool Trait:** Associated types for zero-cost abstraction (performance-first)
-- **Storage:** redb instead of sled (actively maintained, pure Rust)
-- **Timeouts:** Per-tool configuration (flexibility over hardcoded defaults)
-- **Dry-run:** Config-based default (user choice via config.toml)
-- **Platform:** Full cross-platform support (Linux, macOS, Windows)
-
-## License
-
-MIT OR Apache-2.0
+Distributed under the MIT or Apache-2.0 license.

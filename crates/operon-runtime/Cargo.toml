@@ -13,3 +13,14 @@ tracing-subscriber = { workspace = true }
 async-trait = "0.1"
 dashmap = "6"
 redb = "2"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures = "0.3"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+notify = "7"
+notify-debouncer-mini = "0.5"
+toml = "0.8"
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3"

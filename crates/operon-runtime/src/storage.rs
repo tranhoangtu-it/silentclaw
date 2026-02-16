@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use redb::{Database, TableDefinition};
+use redb::{Database, ReadableTable, TableDefinition};
 use serde_json::Value;
 
 const STATE_TABLE: TableDefinition<&str, &str> = TableDefinition::new("state");
@@ -48,5 +48,17 @@ impl Storage {
             }
             None => Ok(None),
         }
+    }
+
+    /// List all stored step keys
+    pub fn list_keys(&self) -> Result<Vec<String>> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(STATE_TABLE)?;
+        let mut keys = Vec::new();
+        for entry in table.iter()? {
+            let (key, _): (redb::AccessGuard<&str>, redb::AccessGuard<&str>) = entry?;
+            keys.push(key.value().to_string());
+        }
+        Ok(keys)
     }
 }

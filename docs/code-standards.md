@@ -1,72 +1,86 @@
 # SilentClaw - Code Standards & Development Guidelines
 
-**Last Updated:** 2026-02-16
-**Version:** 1.0.0
+**Last Updated:** 2026-02-17
+**Version:** 2.0.0
 **Audience:** Developers, maintainers, contributors
 
 ## Project Overview
 
-**SilentClaw** is a Rust-based action orchestrator providing:
-- Async runtime with Tool trait abstraction
-- Python subprocess adapter (JSON-over-stdio protocol)
-- Shell command executor with safety defaults
-- CLI interface for plan execution
-- Structured JSON logging
+**SilentClaw** is a comprehensive Rust agent platform providing:
+- **LLM Integration** - Anthropic/OpenAI with failover chains
+- **Agent Loop** - Conversation state + tool orchestration
+- **Event Hooks** - Extensible event-driven architecture (DashMap registry)
+- **Plugin System** - Dynamic tool/hook loading with API versioning
+- **Gateway Server** - HTTP/WebSocket API (Axum framework)
+- **Config Hot-Reload** - File watcher for live updates
+- **Tool Adapters** - Python + Shell execution
+- **Structured Logging** - JSON logs via tracing
 
 **Codebase Stats:**
-- **Total LOC:** 633 (Rust)
+- **Repository:** 5 crates + 1 SDK crate
 - **Clippy Warnings:** 0
 - **Format Issues:** 0
-- **Test Coverage:** 11 tests, 100% passing
-- **Repository:** Monorepo workspace with 3 crates
+- **Architecture:** Modular, event-driven, extensible
 
 ## Codebase Structure
 
 ```
 silentclaw/
-├── Cargo.toml              # Workspace definition
-├── Cargo.lock              # Dependency lock
-├── README.md               # User guide
+├── Cargo.toml
+├── README.md
 │
 ├── crates/
-│   ├── operon-runtime/     # Core async runtime
+│   ├── operon-runtime/          # Core engine + new features
 │   │   └── src/
-│   │       ├── lib.rs      # Public API (Tool, Runtime, Storage)
-│   │       ├── tool.rs     # Tool trait definition
-│   │       ├── runtime.rs  # Plan executor engine
-│   │       └── storage.rs  # redb persistence layer
+│   │       ├── lib.rs
+│   │       ├── tool.rs
+│   │       ├── runtime.rs
+│   │       ├── storage.rs
+│   │       ├── agent_module.rs  # (NEW)
+│   │       ├── llm/             # (NEW) Provider + clients
+│   │       ├── hooks/           # (NEW) Event system
+│   │       ├── config/          # (NEW) Hot-reload
+│   │       ├── plugin/          # (NEW) Plugin loader
+│   │       ├── replay.rs        # (NEW) Fixture support
+│   │       └── scheduler.rs     # (NEW) Task scheduling
 │   │
-│   ├── operon-adapters/    # Tool implementations
+│   ├── operon-adapters/         # Tool implementations
 │   │   └── src/
-│   │       ├── lib.rs      # Public API
-│   │       ├── python_adapter.rs  # JSON-over-stdio for Python
-│   │       └── shell_tool.rs      # sh -c executor
+│   │       ├── lib.rs
+│   │       ├── python_adapter.rs
+│   │       └── shell_tool.rs
 │   │
-│   └── warden/             # CLI binary
+│   ├── operon-gateway/          # (NEW) HTTP/WebSocket
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── server.rs
+│   │       ├── session_manager.rs
+│   │       └── types.rs
+│   │
+│   ├── operon-plugin-sdk/       # (NEW) Plugin SDK
+│   │   └── src/
+│   │       └── lib.rs
+│   │
+│   └── warden/                  # CLI (expanded)
 │       └── src/
-│           ├── main.rs     # Entry point
-│           ├── cli.rs      # Clap arguments
-│           ├── config.rs   # TOML config loading
+│           ├── main.rs
+│           ├── cli.rs
+│           ├── config.rs
 │           └── commands/
-│               └── run_plan.rs    # Plan execution
+│               ├── run_plan.rs
+│               ├── chat.rs        # (NEW)
+│               ├── serve.rs       # (NEW)
+│               └── plugin.rs      # (NEW)
 │
-├── examples/
-│   ├── plan_hello.json     # Demo plan
-│   └── echo_tool.py        # Python tool example
+├── docs/
+│   ├── system-architecture.md
+│   ├── code-standards.md (this file)
+│   ├── codebase-summary.md
+│   └── known-limitations.md
 │
-├── tools/
-│   └── (User-provided Python tools)
-│
-├── tests/
-│   ├── shell_tool_tests.rs
-│   ├── runtime_tests.rs
-│   └── cli_integration_tests.rs
-│
-└── docs/
-    ├── system-architecture.md
-    ├── known-limitations.md
-    ├── code-standards.md (this file)
-    └── codebase-summary.md
+└── examples/
+    ├── plan_hello.json
+    └── echo_tool.py
 ```
 
 ## Rust Code Standards
@@ -440,19 +454,243 @@ cargo clippy --all -- -D warnings
 cargo clippy --fix --allow-dirty
 ```
 
-### 9. Dependency Management
+### 9. Concurrent Data Structures (NEW)
 
-**Keep dependencies minimal:**
+**Use DashMap for lock-free concurrent access:**
+
+```rust
+use dashmap::DashMap;
+
+// ✅ Good: Lock-free concurrent hashmap
+let hooks: DashMap<HookEvent, Vec<Arc<dyn Hook>>> = DashMap::new();
+hooks.insert(HookEvent::BeforeToolCall, vec![...]);
+
+for entry in hooks.iter() {
+    process(entry.key(), entry.value());
+}
+
+// ❌ Bad: Mutex contention on hot path
+let hooks = Mutex::new(HashMap::new());
+let _guard = hooks.lock().unwrap();  // Blocks other threads
+```
+
+**Broadcast channels for pub/sub (WebSocket patterns):**
+
+```rust
+use tokio::sync::broadcast;
+
+// ✅ Good: Multi-receiver pub/sub
+let (tx, _rx) = broadcast::channel(100);
+
+// Multiple clients subscribe
+let mut rx1 = tx.subscribe();
+let mut rx2 = tx.subscribe();
+
+// Broadcast to all
+tx.send(message).unwrap();
+
+// ❌ Bad: Mutex + Vec for multiple receivers
+let listeners = Mutex::new(vec![...]);
+for listener in listeners.lock().unwrap().iter() {
+    listener.send(message);  // Sequential, not broadcast
+}
+```
+
+### 10. Event-Driven Architecture (NEW)
+
+**Hook pattern for extensibility:**
+
+```rust
+use async_trait::async_trait;
+
+// ✅ Good: Event handler abstraction
+#[async_trait]
+pub trait Hook: Send + Sync {
+    async fn handle(&self, context: HookContext) -> Result<HookResult>;
+}
+
+// Plugin registers hook at runtime
+pub struct AuditHook;
+
+#[async_trait]
+impl Hook for AuditHook {
+    async fn handle(&self, context: HookContext) -> Result<HookResult> {
+        info!(event = ?context.event, user = context.user_id, "Audit log");
+        Ok(HookResult::Continue)
+    }
+}
+
+// Registry manages hooks (DashMap)
+hooks_registry.register(HookEvent::BeforeToolCall, Arc::new(AuditHook))?;
+
+// ❌ Bad: Hard-coded audit logic in every function
+async fn execute_tool(name: &str) -> Result<()> {
+    info!("Executing tool: {}", name);  // Can't remove without code change
+    // ...
+}
+```
+
+**Hook context should be minimal:**
+
+```rust
+// ✅ Good: Structured event data
+pub struct HookContext {
+    pub event: HookEvent,
+    pub user_id: String,
+    pub tool_name: String,
+    pub metadata: HashMap<String, Value>,  // Extensible
+}
+
+// ❌ Bad: Large, tightly-coupled context
+pub struct HookContext {
+    pub runtime: Arc<Runtime>,  // Circular dependency
+    pub session: Arc<Session>,
+    pub full_history: Vec<Message>,  // Too much data
+}
+```
+
+### 11. Plugin System Patterns (NEW)
+
+**Plugin trait design for static dispatch:**
+
+```rust
+// ✅ Good: Trait with dyn object support
+pub trait Plugin: Send + Sync {
+    fn name(&self) -> &str;
+    fn version(&self) -> &str;
+    fn api_version(&self) -> u32;  // Version checking
+    fn tools(&self) -> Vec<Box<dyn Tool>>;
+    fn hooks(&self) -> Vec<Box<dyn Hook>>;
+}
+
+// Manifest versioning prevents ABI breaks
+pub const API_VERSION: u32 = 1;
+
+pub struct MyPlugin;
+impl Default for MyPlugin {
+    fn default() -> Self { Self }
+}
+
+#[async_trait]
+impl Tool for MyPluginTool {
+    // ...
+}
+
+impl Plugin for MyPlugin {
+    fn api_version(&self) -> u32 { API_VERSION }
+    fn tools(&self) -> Vec<Box<dyn Tool>> {
+        vec![Box::new(MyPluginTool)]
+    }
+    // ...
+}
+
+// Declare entry point macro
+declare_plugin!(MyPlugin);
+```
+
+**Plugin loader with version safety:**
+
+```rust
+// ✅ Good: Check API version before loading
+pub async fn load_plugin(&mut self, path: &Path) -> Result<()> {
+    let manifest: PluginManifest = load_toml(path)?;
+
+    // Check API version compatibility
+    if manifest.api_version != API_VERSION {
+        anyhow::bail!(
+            "Plugin {} requires API v{}, but runtime is v{}",
+            manifest.name, manifest.api_version, API_VERSION
+        );
+    }
+
+    // Load dynamic library
+    let plugin = unsafe { load_library(&path)? };
+    self.plugins.insert(manifest.name, plugin);
+    Ok(())
+}
+```
+
+### 12. Config Hot-Reload Pattern (NEW)
+
+**File watcher for live configuration:**
+
+```rust
+use notify::{Watcher, RecursiveMode, watcher};
+use std::sync::mpsc;
+
+// ✅ Good: Watch config file for changes
+pub struct ConfigManager {
+    watcher: RecommendedWatcher,
+    config: Arc<RwLock<Config>>,
+}
+
+impl ConfigManager {
+    pub fn new(path: &Path) -> Result<Self> {
+        let (tx, rx) = mpsc::channel();
+
+        let mut watcher = watcher(
+            move |res: notify::Result<Event>| {
+                if let Ok(Event { kind: EventKind::Modify, .. }) = res {
+                    tx.send(ConfigReloadEvent).ok();
+                }
+            },
+            Duration::from_secs(2),
+        )?;
+
+        watcher.watch(path, RecursiveMode::NonRecursive)?;
+
+        // Spawn reload task
+        tokio::spawn(Self::reload_loop(rx, config.clone()));
+
+        Ok(Self { watcher, config })
+    }
+
+    async fn reload_loop(rx: Receiver<ConfigReloadEvent>, config: Arc<RwLock<Config>>) {
+        while let Ok(_) = rx.recv() {
+            if let Ok(new_config) = Config::load() {
+                *config.write().unwrap() = new_config;
+                info!("Config reloaded");
+            }
+        }
+    }
+}
+
+// ❌ Bad: Require restart for config changes
+pub fn load_config(path: &str) -> Config {
+    Config::from_file(path)  // Static at startup
+}
+```
+
+### 13. Dependency Management
+
+**Keep dependencies minimal (with justified new ones):**
 
 ```toml
 [dependencies]
-tokio = { version = "1", features = ["full"] }  # ✅ Essential for async
-serde = { version = "1", features = ["derive"] }  # ✅ Essential for JSON
-anyhow = "1"                                       # ✅ Essential for errors
-tracing = "0.1"                                    # ✅ Essential for logging
+# Core async + serialization (v1.0)
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
 
-# NOT: Random dependencies for convenience
-fancy_string_lib = "1.0"  # ❌ Avoid unless critical
+# New in v2.0 (justified)
+async_trait = "0.1"         # ✅ Async trait support (used pervasively)
+dashmap = "5"               # ✅ Lock-free registry (hot path)
+axum = "0.7"                # ✅ Minimal HTTP framework (gateway)
+uuid = { version = "1", features = ["v4", "serde"] }  # ✅ Session IDs
+chrono = { version = "0.4", features = ["serde"] }    # ✅ Timestamps
+reqwest = { version = "0.11", features = ["json"] }   # ✅ LLM API calls
+notify = "6"                # ✅ File watcher (config reload)
+toml = "0.8"                # ✅ Plugin manifest parsing
+
+# New in v2.1 (Production Hardening - justified)
+tower = "0.4"               # ✅ Middleware framework (auth, rate limit)
+tower-http = { version = "0.5", features = ["cors", "timeout"] }  # ✅ HTTP utilities
+
+# ❌ Avoid unless critical
+fancy_string_lib = "1.0"  # Not justified
 ```
 
 **Use workspace dependencies for consistency:**
@@ -693,6 +931,315 @@ cargo doc --open
 
 # Build without opening
 cargo doc --no-deps
+```
+
+## Production Hardening Patterns (NEW)
+
+### 14. Bearer Token Authentication
+
+**Middleware pattern for HTTP API security:**
+
+```rust
+use axum::middleware::Next;
+use axum::http::{Request, StatusCode};
+
+pub async fn auth_middleware<B>(
+    req: Request<B>,
+    next: Next,
+) -> Result<impl IntoResponse, StatusCode> {
+    // Extract Authorization header
+    let token = req
+        .headers()
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    // Validate token
+    if !validate_token(token)? {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    Ok(next.run(req).await)
+}
+
+// Apply to routes
+let app = Router::new()
+    .route("/sessions", post(create_session))
+    .layer(middleware::from_fn(auth_middleware));
+```
+
+### 15. Rate Limiting (Token Bucket)
+
+**Distribute fairly using concurrent token bucket:**
+
+```rust
+use dashmap::DashMap;
+
+pub struct RateLimiter {
+    buckets: DashMap<String, TokenBucket>,
+    tokens_per_sec: u32,
+}
+
+impl RateLimiter {
+    pub fn check_rate_limit(&self, client_id: &str) -> Result<(), StatusCode> {
+        let mut entry = self.buckets
+            .entry(client_id.to_string())
+            .or_insert_with(|| TokenBucket::new(self.tokens_per_sec));
+
+        if entry.consume_token() {
+            Ok(())
+        } else {
+            Err(StatusCode::TOO_MANY_REQUESTS)
+        }
+    }
+}
+
+// Apply to routes
+let rate_limiter = Arc::new(RateLimiter::new(100)); // 100 req/sec per client
+
+let app = Router::new()
+    .route("/api", post(handler))
+    .layer(middleware::from_fn(move |req, next| {
+        let client_id = get_client_id(&req)?;
+        rate_limiter.check_rate_limit(&client_id)?;
+        Ok(next.run(req).await)
+    }));
+```
+
+### 16. Input Size Validation
+
+**Enforce message size limits in WebSocket:**
+
+```rust
+const MAX_MESSAGE_BYTES: usize = 51200; // 50KB
+
+pub async fn handle_websocket(
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    ws.on_upgrade(|mut socket| async move {
+        while let Some(msg) = socket.recv().await {
+            match msg {
+                Ok(Message::Text(text)) => {
+                    if text.len() > MAX_MESSAGE_BYTES {
+                        let _ = socket.send(Message::Close(None)).await;
+                        return;
+                    }
+                    // Process message
+                }
+                _ => {}
+            }
+        }
+    })
+}
+```
+
+### 17. Graceful Shutdown with Drain
+
+**Allow in-flight requests to complete:**
+
+```rust
+use tokio::sync::broadcast;
+
+pub async fn start_server() -> Result<()> {
+    let (shutdown_tx, _) = broadcast::channel(1);
+    let server = axum::Server::bind(&addr)
+        .serve(app)
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_tx.subscribe().recv().await;
+        });
+
+    // Signal handler
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        shutdown_tx.send(()).ok();  // Trigger shutdown
+    });
+
+    // Graceful drain: 10s timeout
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        server
+    ).await??;
+
+    Ok(())
+}
+```
+
+### 18. Config Validation at Load Time
+
+**Catch errors early, not at runtime:**
+
+```rust
+pub struct Config {
+    pub version: u32,
+    pub runtime: RuntimeConfig,
+    pub gateway: GatewayConfig,
+}
+
+impl Config {
+    pub fn validate(&self) -> Result<()> {
+        // Check version compatibility
+        if self.version != CURRENT_VERSION {
+            anyhow::bail!("Config version {} not supported", self.version);
+        }
+
+        // Validate required fields
+        if self.gateway.bind.is_empty() {
+            anyhow::bail!("gateway.bind is required");
+        }
+
+        // Validate constraints
+        if self.runtime.max_parallel == 0 {
+            anyhow::bail!("runtime.max_parallel must be > 0");
+        }
+
+        Ok(())
+    }
+
+    pub fn load(path: &Path) -> Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        let config: Config = toml::from_str(&content)?;
+        config.validate()?;  // Validate immediately
+        Ok(config)
+    }
+}
+```
+
+### 19. Environment Variable Overrides
+
+**Allow runtime configuration without file changes:**
+
+```rust
+use std::env;
+
+pub fn load_config_with_env(path: &Path) -> Result<Config> {
+    let mut config = Config::load(path)?;
+
+    // Allow env var overrides for sensitive values
+    if let Ok(timeout) = env::var("SILENTCLAW_TIMEOUT") {
+        config.runtime.timeout_secs = timeout.parse()?;
+    }
+
+    if let Ok(api_key) = env::var("ANTHROPIC_API_KEY") {
+        config.llm.api_key = api_key;
+    }
+
+    Ok(config)
+}
+```
+
+### 20. Per-Hook Timeout & Critical Flags
+
+**Prevent hooks from blocking execution:**
+
+```rust
+#[async_trait]
+pub trait Hook: Send + Sync {
+    async fn handle(&self, context: HookContext) -> Result<HookResult>;
+    fn timeout(&self) -> Duration { Duration::from_secs(5) }  // Default
+    fn critical(&self) -> bool { false }  // Non-blocking by default
+}
+
+pub async fn execute_hooks(hooks: &[Arc<dyn Hook>]) -> Result<()> {
+    for hook in hooks {
+        let timeout = hook.timeout();
+        let critical = hook.critical();
+
+        match tokio::time::timeout(timeout, hook.handle(context)).await {
+            Ok(Ok(result)) => { /* continue */ }
+            Ok(Err(e)) => {
+                if critical {
+                    return Err(e);  // Abort on critical failure
+                } else {
+                    warn!(error = ?e, "Hook failed (non-critical)");
+                }
+            }
+            Err(_) => {
+                if critical {
+                    anyhow::bail!("Critical hook timeout");
+                } else {
+                    warn!("Hook timeout (non-critical)");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+```
+
+### 21. Vision/Multimodal Content Encoding
+
+**Base64 encode images for LLM APIs:**
+
+```rust
+use base64::{engine::general_purpose, Engine as _};
+use std::fs;
+
+pub fn encode_image_for_anthropic(image_path: &Path) -> Result<String> {
+    // Determine media type
+    let extension = image_path.extension()
+        .and_then(|s| s.to_str())
+        .ok_or(anyhow::anyhow!("Invalid image path"))?;
+
+    let media_type = match extension {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        _ => anyhow::bail!("Unsupported image format: {}", extension),
+    };
+
+    // Read and encode
+    let image_data = fs::read(image_path)?;
+    let base64_image = general_purpose::STANDARD.encode(&image_data);
+
+    Ok(format!("data:{};base64,{}", media_type, base64_image))
+}
+```
+
+### 22. Cumulative Token Tracking
+
+**Monitor LLM usage without expensive queries:**
+
+```rust
+use std::sync::atomic::{AtomicU64, Ordering};
+
+pub struct Usage {
+    input_tokens: AtomicU64,
+    output_tokens: AtomicU64,
+}
+
+impl Usage {
+    pub fn add_input(&self, tokens: u64) {
+        self.input_tokens.fetch_add(tokens, Ordering::Relaxed);
+    }
+
+    pub fn add_output(&self, tokens: u64) {
+        self.output_tokens.fetch_add(tokens, Ordering::Relaxed);
+    }
+
+    pub fn total(&self) -> u64 {
+        let input = self.input_tokens.load(Ordering::Relaxed);
+        let output = self.output_tokens.load(Ordering::Relaxed);
+        input + output
+    }
+}
+
+// In Session
+pub struct Session {
+    pub id: String,
+    pub usage: Usage,  // Track cumulatively
+}
+
+impl Session {
+    pub fn warn_if_approaching_limit(&self) {
+        let total = self.usage.total();
+        let limit = 100_000; // Example limit
+        if total > (limit as f64 * 0.8) as u64 {
+            warn!(tokens = total, "Approaching token limit");
+        }
+    }
+}
 ```
 
 ## Security Guidelines

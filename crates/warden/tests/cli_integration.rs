@@ -41,4 +41,5 @@ fn test_warden_help() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("run-plan"));
+    assert!(stdout.contains("execution-mode"));
 }
