@@ -1,0 +1,22 @@
+{
+  "id": "plan-hello-001",
+  "description": "Demo plan validating shell + python tools",
+  "steps": [
+    {
+      "tool": "shell",
+      "input": {
+        "cmd": "echo 'Hello from Shell'"
+      }
+    },
+    {
+      "tool": "python",
+      "input": {
+        "script": "tools/python_examples/echo_tool.py",
+        "method": "echo",
+        "params": {
+          "message": "Hello from Python"
+        }
+      }
+    }
+  ]
+}
