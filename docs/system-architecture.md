@@ -317,6 +317,10 @@ version = "0.1.0"
 api_version = 1
 description = "Custom tools for workflows"
 
+[plugin.config]  # Optional: passed to Plugin::init()
+setting1 = "value"
+timeout_ms = 5000
+
 [[tools]]
 name = "analyzer"
 description = "Analyzes data"
@@ -351,7 +355,7 @@ pub trait Plugin: Send + Sync {
     fn name(&self) -> &str;
     fn version(&self) -> &str;
     fn api_version(&self) -> u32;
-    fn init(&mut self, config: Value) -> Result<()>;
+    fn init(&mut self, config: Value) -> Result<()>;  // config from manifest [plugin.config]
     fn shutdown(&mut self) -> Result<()>;
     fn tools(&self) -> Vec<Box<dyn Tool>>;
     fn hooks(&self) -> Vec<Box<dyn Hook>>;
@@ -359,6 +363,12 @@ pub trait Plugin: Send + Sync {
 ```
 
 Re-exported by `operon-plugin-sdk` for plugin authors.
+
+**FFI Safety Documentation:**
+- `PluginHandle` uses double-boxing pattern to avoid fat pointer issues at FFI boundary
+- `Library` field dropped AFTER plugin (Rust drop order guarantee)
+- `shutdown_and_drop()` wraps `plugin.shutdown()` with `catch_unwind` for panic isolation
+- Comprehensive safety comments on all unsafe blocks
 
 ### Layer 7: Gateway Server (Production Hardened + Phase 2 Tests)
 
@@ -383,9 +393,9 @@ pub async fn start_server(
 
 **Phase 2 Test Coverage (20 integration tests):**
 - **Health & Sessions (8 tests):** Health endpoint, session CRUD, message sending, payload limits
-- **Auth & Rate Limiting (8 tests):** Bearer token validation, rate limiter bucket algorithm, concurrent limits
+- **Auth & Rate Limiting (8 tests):** Constant-time token comparison, rate limiter bucket algorithm, concurrent limits
 - **WebSocket (4 tests):** Upgrade handling, event broadcast, subscription management
-- **Test Infrastructure:** Helper utilities for stateful and stateless test patterns
+- **Test Infrastructure:** TempDir-backed test databases for auto-cleanup, helper utilities for stateful/stateless patterns
 
 **HTTP Routes:**
 - `GET /health` - Liveness check
@@ -404,6 +414,7 @@ pub async fn start_server(
 
 **Session Manager:**
 - Tracks active sessions (HashMap)
+- `send_message()` uses remove/insert pattern: removes session (short write lock) → processes LLM call lock-free → re-inserts session (short write lock)
 - Persists to JSON on disk
 - Cleanup on disconnect (timeout)
 - Concurrent session support
@@ -426,13 +437,15 @@ pub async fn start_server(
 ```
 
 **Auth Middleware:**
-- Validates `Authorization: Bearer <token>` header
+- Validates `Authorization: Bearer <token>` header via `subtle` crate constant-time comparison
+- Prevents timing attack side-channels
 - Configurable token validation logic
 - Returns 401 Unauthorized on invalid token
 
 **Rate Limiter:**
 - Token bucket algorithm per client
 - Configurable tokens/second
+- Wired into Axum router middleware (now active)
 - Returns 429 Too Many Requests when limited
 
 ### Layer 8: Core Runtime (operon-runtime)

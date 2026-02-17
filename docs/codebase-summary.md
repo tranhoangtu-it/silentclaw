@@ -2,7 +2,7 @@
 
 **Generated:** 2026-02-17
 **Version:** 2.0.0-phase-2
-**Status:** Phase 2 Complete - Plugin FFI + Gateway Tests
+**Status:** Phase 2 Complete + Code Review Hardening
 
 ## Quick Reference
 
@@ -18,23 +18,76 @@
 | **Main Binary** | `warden` (action orchestrator + agent + server) |
 | **Core Libraries** | operon-runtime, operon-gateway, operon-plugin-sdk |
 | **Tool Adapters** | `operon-adapters` (Python + Shell) |
-| **Streaming Support** | SSE streaming (Anthropic + OpenAI), 1MB buffer protection |
+| **Streaming Support** | SSE streaming (Anthropic + OpenAI), 1MB buffer protection, UTF-8 safe |
 | **Config Reload** | File watcher + broadcast channel, live updates without restart |
+| **Session Manager** | Race condition fixed: orphan session detection after re-insert |
+| **Health Endpoint** | Excluded from rate limiting (LB health checks not throttled) |
+| **Review Findings** | All 5 code review items fixed (H2, H3, M1, M2, M4) |
+
+## Code Review Hardening (Post-Phase 2)
+
+**Session 2026-02-17: All 5 Review Findings Fixed**
+
+Critical bug fixes addressing architectural race conditions and data integrity issues:
+
+1. **H2: Session Orphan Race Condition** (CRITICAL)
+   - **Issue:** `send_message()` removes session from map before LLM call. If `delete_session()` runs during this window, it removes the event_bus. When `send_message()` re-inserts the session, it becomes an orphan (no one can delete/subscribe).
+   - **Fix:** Added event_bus existence check after re-insert. If missing, remove orphan and return error.
+   - **Impact:** Prevents resource leak in long-running sessions.
+
+2. **H3: Rate Limiter on `/health`** (HIGH)
+   - **Issue:** Load balancers poll `/health` at high frequency. Global rate limiting marks service unhealthy, breaking production deployments.
+   - **Fix:** Skip rate limiting for `/health` path in `rate_limit_middleware`.
+   - **Impact:** Health checks never throttled, regardless of traffic.
+
+3. **M1: SSE UTF-8 Corruption** (MEDIUM)
+   - **Issue:** Multi-byte UTF-8 chars split across HTTP chunks get corrupted by `String::from_utf8_lossy()` on chunk boundaries.
+   - **Fix:** Refactored to use `Vec<u8>` buffer, decode UTF-8 only at SSE event boundaries (`\n\n`).
+   - **Impact:** CJK characters and emoji no longer corrupted in streaming responses.
+
+4. **M4: Duplicated SSE Streaming Loop** (MEDIUM)
+   - **Issue:** Anthropic and OpenAI providers both had identical SSE parsing loops (~65 lines each).
+   - **Fix:** Extracted shared `drive_sse_stream()` function in `streaming.rs`. Both providers now call it with parser closures.
+   - **Impact:** DRY principle applied, single source of truth for SSE handling.
+
+5. **M2: Config Reload Misleading Logs** (MEDIUM)
+   - **Issue:** Logs claimed config changes apply at runtime, but provider hot-swap not implemented.
+   - **Fix:** Updated log messages to honestly state "note: runtime provider swap not yet implemented".
+   - **Impact:** Accurate operator expectations, scaffolding preserved for future hot-swap feature.
+
+**Files Modified:**
+- `crates/operon-gateway/src/session_manager.rs` - Orphan detection logic
+- `crates/operon-gateway/src/rate_limiter.rs` - `/health` exemption
+- `crates/operon-runtime/src/llm/streaming.rs` - UTF-8 safe buffer, `drive_sse_stream()`
+- `crates/operon-runtime/src/llm/anthropic.rs` - Delegated to `drive_sse_stream()`
+- `crates/operon-runtime/src/llm/openai.rs` - Delegated to `drive_sse_stream()`
+- `crates/warden/src/commands/chat.rs` - Fixed reload log message
+- `crates/warden/src/commands/serve.rs` - Fixed reload log message
+
+**Test Results:** All 90+ tests passing, 0 clippy warnings
 
 ## Phase 2 Implementation Summary
 
 **Completed Features:**
 
-1. **Plugin FFI System** - Dynamic native plugin loading via libloading
+1. **Production Hardening** - Security & performance improvements
+   - **Auth:** Constant-time token comparison via `subtle` crate (prevents timing attacks)
+   - **Session Manager:** `send_message()` uses remove/insert pattern to avoid holding write lock during LLM calls
+   - **Rate Limiter:** Now wired into Axum router (was defined but unused)
+   - **Test Infrastructure:** All test DB files use `tempfile::TempDir` for auto-cleanup
+   - **FFI Safety:** Comprehensive `# Safety` documentation on `PluginHandle` and `_plugin_destroy()`
+
+2. **Plugin FFI System** - Dynamic native plugin loading via libloading
    - New module: `crates/operon-runtime/src/plugin/ffi_bridge.rs` (~119 LOC, 2 tests)
    - `plugin_trait.rs` — Moved Plugin trait from SDK to runtime (avoids circular dep)
    - `PluginHandle` — Double-boxing pattern for FFI-safe trait object loading
+   - `PluginManifest` — Now has optional `config` field passed to `Plugin::init()`
    - `loader.rs` — Updated to use PluginHandle with `libloading` crate
    - `declare_plugin!` macro — Generates `_plugin_create()` and `_plugin_destroy()` with `extern "C"`
    - Panic isolation via `catch_unwind` for plugin safety
    - 2 comprehensive tests (nonexistent library, invalid library handling)
 
-2. **Gateway Integration Tests** - 20 comprehensive tests across 3 files
+3. **Gateway Integration Tests** - 20 comprehensive tests across 3 files
    - `health_and_session_test.rs` (196 LOC) — 8 tests
      - Health endpoint (status=ok)
      - Session CRUD (create, get, list, delete)
@@ -179,14 +232,14 @@ pub struct ConfigManager<C: DeserializeOwned + Send + Sync> { /* ... */ }
   - Returns exit code
   - Dry-run mode (logs only, no execution)
 
-### 3. operon-gateway (Production Hardened)
+### 3. operon-gateway (Production Hardened + Review Fixes)
 
-**Purpose:** HTTP/WebSocket API server with security hardening
+**Purpose:** HTTP/WebSocket API server with security hardening and race condition fixes
 
 **Components:**
 
 - **server.rs** - Axum HTTP/WebSocket routing
-  - GET `/health` - Health check
+  - GET `/health` - Health check (H3: excluded from rate limiting)
   - POST `/sessions` - Create new session
   - GET `/sessions/{id}` - Get session
   - WebSocket `/ws/{id}` - Real-time messages (5-min idle timeout)
@@ -195,10 +248,17 @@ pub struct ConfigManager<C: DeserializeOwned + Send + Sync> { /* ... */ }
   - Input validation (50KB limit)
   - 10s graceful shutdown drain
 
-- **session_manager.rs** - Session lifecycle management
+- **session_manager.rs** - Session lifecycle management (H2: orphan race detection)
+  - Detects when session deleted during LLM processing
+  - Prevents orphan sessions from accumulating
+  - Event_bus check after re-insert confirms session still valid
+
+- **rate_limiter.rs** - Token bucket rate limiting (H3: `/health` exempt)
+  - Skip rate limiting for health check endpoint
+  - LB health checks never throttled
+
 - **types.rs** - WebSocket message types
 - **auth.rs** - Bearer token authentication
-- **rate_limiter.rs** - Token bucket rate limiting
 
 ### 4. operon-plugin-sdk (Plugin SDK)
 
@@ -276,11 +336,11 @@ crates/
 
 ## Phase 1 Key Changes
 
-### Streaming SSE Module
+### Streaming SSE Module (UTF-8 Safe)
 
-**File:** `crates/operon-runtime/src/llm/streaming.rs` (348 LOC)
+**File:** `crates/operon-runtime/src/llm/streaming.rs` (~415 LOC post-refactor)
 
-Parses Server-Sent Events from Anthropic and OpenAI streaming endpoints:
+Parses Server-Sent Events from Anthropic and OpenAI streaming endpoints with UTF-8 safety:
 
 ```rust
 pub enum StreamChunk {
@@ -292,11 +352,18 @@ pub enum StreamChunk {
 
 pub fn parse_anthropic_sse(data: &str) -> Option<StreamChunk>
 pub fn parse_openai_sse(data: &str) -> Vec<StreamChunk>
+pub async fn drive_sse_stream<S, F>(byte_stream: S, parse_event: F, tx: Sender<StreamChunk>)
 ```
+
+**Shared SSE Loop (`drive_sse_stream`):**
+- Uses `Vec<u8>` buffer to avoid UTF-8 corruption at chunk boundaries
+- Decodes UTF-8 only at SSE event boundaries (`\n\n`), where data is guaranteed complete
+- Extracted from provider implementations (DRY fix for M4)
+- Supports both Anthropic and OpenAI via parser closure pattern
 
 **Anthropic Events Handled:**
 - `content_block_start` → ToolCallStart (for tool_use blocks)
-- `content_block_delta` → TextDelta or ToolCallDelta
+- `content_block_delta` → TextDelta or ToolCallDelta (with tool_id tracking)
 - `message_delta` → Done with stop_reason and usage
 - `message_stop` → ignored (data in message_delta)
 
@@ -310,9 +377,14 @@ pub fn parse_openai_sse(data: &str) -> Vec<StreamChunk>
 - 1MB buffer limit enforced before accumulating chunks
 - Prevents attacks via large streaming responses
 
-**Tests:** 17 comprehensive unit tests
-- Anthropic: text_delta, tool_call_start, tool_call_delta, message_delta, unknown_event
-- OpenAI: text_delta, done_signal, tool_call_start, tool_call_argument_delta, finish_reason_stop
+**UTF-8 Safety (M1 Fix):**
+- Multi-byte UTF-8 chars (e.g., CJK, emoji) no longer corrupted across chunk boundaries
+- Previous bug: `String::from_utf8_lossy()` on chunk boundaries replaced incomplete bytes with U+FFFD
+- New approach: Buffer raw bytes, decode complete UTF-8 at event boundaries
+
+**Tests:** 17 comprehensive unit tests + integration coverage
+- Anthropic: text_delta, tool_call_start, tool_call_delta, message_delta, unknown_event, UTF-8 safety
+- OpenAI: text_delta, done_signal, tool_call_start, tool_call_argument_delta, finish_reason_stop, UTF-8 safety
 
 ### Config Hot-Reload
 
