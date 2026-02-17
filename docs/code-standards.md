@@ -1,7 +1,7 @@
 # SilentClaw - Code Standards & Development Guidelines
 
-**Last Updated:** 2026-02-17
-**Version:** 2.0.0
+**Last Updated:** 2026-02-18
+**Version:** 2.1.0 (Phase 6 Code Review)
 **Audience:** Developers, maintainers, contributors
 
 ## Project Overview
@@ -173,7 +173,31 @@ let field = value.get("field").unwrap();  // Only in tests/examples
 let field = value["field"].as_str().unwrap();
 ```
 
-### 3. Async Patterns
+### 3. Arc Pattern & Builder Safety (NEW - Phase 6)
+
+**Build runtime before Arc wrapping (safer, more flexible):**
+
+```rust
+// ✅ Good (Phase 6): Construct fully, then wrap
+let mut runtime = Runtime::new(false, default_timeout)?;
+runtime.set_policy(policy_pipeline);
+runtime.configure_timeout("shell", shell_timeout);
+let runtime = Arc::new(runtime);  // Wrap after full construction
+
+// ❌ Bad (Pre-Phase 6): Arc first, then get_mut()
+let runtime = Arc::new(Runtime::new(false, default_timeout)?);
+Arc::get_mut(&mut runtime).expect("").set_policy(policy_pipeline);  // Fragile
+```
+
+**Benefits:**
+- No panic on `Arc::get_mut().expect()`
+- Clearer intent (construct → wrap → immutable)
+- More flexible for refactoring
+- Works with shared ownership patterns
+
+**Guidance:** Always build state before Arc wrapping. Use builders for configuration.
+
+### 4. Async Patterns
 
 **Use `#[tokio::main]` for async entry points:**
 
@@ -228,7 +252,7 @@ tokio::time::sleep(Duration::from_secs(1)).await;
 std::thread::sleep(Duration::from_secs(1));
 ```
 
-### 4. Type Safety
+### 5. Type Safety
 
 **Use strong types, avoid String for identifiers:**
 
@@ -265,7 +289,7 @@ pub trait Tool {
 }
 ```
 
-### 5. Logging & Observability
+### 6. Logging & Observability
 
 **Use `tracing` macros, not `println!`:**
 
@@ -306,7 +330,7 @@ info!("Executing tool");
 | **warn** | Concerning but handled | "Timeout, retrying", "Missing optional config" |
 | **error** | Failures that need attention | "Tool crashed", "Invalid plan format" |
 
-### 6. Documentation & Comments
+### 7. Documentation & Comments
 
 **Public APIs require doc comments:**
 
@@ -360,7 +384,7 @@ if self.state.load(Ordering::SeqCst) != 0 {
 // If needed, check git log --all -p -- runtime.rs
 ```
 
-### 7. Testing
+### 8. Testing
 
 **Test file naming (suffix `_test.rs` or `_tests.rs`):**
 
@@ -432,7 +456,7 @@ async fn test_stderr_capture() {
 }
 ```
 
-### 8. Code Formatting
+### 9. Code Formatting
 
 **Use `cargo fmt` for all code:**
 
@@ -454,7 +478,34 @@ cargo clippy --all -- -D warnings
 cargo clippy --fix --allow-dirty
 ```
 
-### 9. Concurrent Data Structures (NEW)
+### 10. Concurrent Data Structures & Atomics (Phase 6 Enhanced)
+
+**Use AtomicU64 for non-blocking counters (Phase 6):**
+
+```rust
+use std::sync::atomic::{AtomicU64, Ordering};
+
+// ✅ Good: Non-blocking counter for IDs (Phase 6)
+static CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+pub fn next_call_id(name: &str) -> String {
+    let n = CALL_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("gemini_{}_{}", name, n)  // Globally unique, no collisions
+}
+
+// ❌ Bad: Mutex-protected counter
+let counter = Arc::new(Mutex::new(0));
+let mut c = counter.lock().unwrap();
+*c += 1;  // Blocking!
+```
+
+**Benefits:**
+- No locks, pure atomic operations
+- Safe across concurrent threads
+- Fast (CPU cache-friendly)
+- Good for high-frequency operations (tool calls)
+
+### 11. Concurrent Data Structures
 
 **Use DashMap for lock-free concurrent access:**
 
@@ -496,7 +547,7 @@ for listener in listeners.lock().unwrap().iter() {
 }
 ```
 
-### 10. Event-Driven Architecture (NEW)
+### 12. Event-Driven Architecture
 
 **Hook pattern for extensibility:**
 
@@ -549,7 +600,7 @@ pub struct HookContext {
 }
 ```
 
-### 11. Plugin System Patterns (NEW)
+### 13. Plugin System Patterns
 
 **Plugin trait design for static dispatch:**
 
@@ -610,7 +661,7 @@ pub async fn load_plugin(&mut self, path: &Path) -> Result<()> {
 }
 ```
 
-### 12. Config Hot-Reload Pattern (NEW)
+### 14. Config Hot-Reload Pattern
 
 **File watcher for live configuration:**
 
@@ -661,7 +712,7 @@ pub fn load_config(path: &str) -> Config {
 }
 ```
 
-### 13. Dependency Management
+### 15. Dependency Management
 
 **Keep dependencies minimal (with justified new ones):**
 
@@ -933,7 +984,7 @@ cargo doc --open
 cargo doc --no-deps
 ```
 
-## Production Hardening Patterns (NEW)
+## Production Hardening Patterns
 
 ### 14. Bearer Token Authentication
 
@@ -1353,6 +1404,23 @@ for step in &plan.steps {
     storage.write_result(&step.id, &result)?;
 }
 ```
+
+## Phase 6 Code Review Fixes - Summary
+
+**Key Improvements Applied:**
+
+1. **Arc Pattern Cleanup** - Build runtime fully before Arc wrapping (safer, more idiomatic)
+2. **Dry-Run Check Reordering** - Check before policy evaluation to prevent rate-limit inflation
+3. **DRY Helpers** - Extract common patterns into helper functions (check_response, parse_permission_level)
+4. **Safer Defaults** - Permission level defaults to Read (not Execute)
+5. **Atomic Counters** - Use AtomicU64 for thread-safe, lock-free ID generation
+6. **Structured Logging** - Add debug/info tracing to critical paths
+7. **Type Safety** - ToolResult.name field for Gemini compatibility
+8. **Function Signatures** - Simplified to &Runtime (not &Arc<Runtime>)
+
+**Result:** Cleaner code, better patterns, safer defaults, no breaking changes.
+
+---
 
 ## Maintenance & Troubleshooting
 

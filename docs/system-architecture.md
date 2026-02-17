@@ -1046,7 +1046,7 @@ enabled = true
 
 [tool_policy.permission]
 enabled = true
-default_level = "execute"      # read, write, execute, network, admin
+default_level = "read"         # Phase 6: Changed from "execute" (safer default)
 
 [tool_policy.rate_limit]
 enabled = false
@@ -1594,13 +1594,22 @@ cargo test --all
 
 ---
 
-**Phase 5 Completed:** 2026-02-18
+**Phase 6 Completed:** 2026-02-18 (Code Review)
+**Improvements:**
+- Arc pattern cleanup (build before wrapping, safer)
+- Dry-run check reordering (prevents rate-limit inflation)
+- DRY helpers (parse_permission_level, check_response)
+- Safer defaults (permission: Read instead of Execute)
+- Unified tool call IDs (AtomicU64 counter)
+- ToolResult.name field for Gemini
+- Simplified function signatures
+**Modified Files:** 8 files (targeted fixes)
+**Test Coverage:** 132 tests (unchanged, all passing)
+**Code Quality:** 0 clippy warnings, DRY principles applied
+**Backward Compatibility:** Fully compatible, no breaking changes
+
+**Phase 5 Completed:** 2026-02-18 (New Features)
 **New Systems:**
 - Google Gemini LLM provider (third provider with SSE streaming, tool calling, vision)
 - 7-layer tool policy pipeline (authorization, validation, rate-limiting, audit)
-**New Modules:** 4 modules (gemini.rs + tool_policy/), ~865 LOC total
-**Modified Files:** 6 files (streaming.rs, config.rs, runtime.rs, chat.rs, lib.rs, llm/mod.rs)
-**Test Coverage:** 132 tests (22 new: 10 Gemini + 12 tool policy, all passing)
-**Code Quality:** 0 clippy warnings, 0 unsafe blocks, trait-based design
-**Security:** Tool policy pipeline with permission check, rate limiting, input validation, audit logging
 **LLM Providers:** 3 providers (Anthropic, OpenAI, Gemini) with automatic failover
