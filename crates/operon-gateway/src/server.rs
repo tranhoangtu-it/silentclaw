@@ -1,7 +1,8 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{Path, State, WebSocketUpgrade};
+use axum::extract::{ConnectInfo, Path, State, WebSocketUpgrade};
 use axum::http::StatusCode;
 use axum::middleware;
 use axum::response::IntoResponse;
@@ -12,7 +13,7 @@ use tower_http::trace::TraceLayer;
 use tracing::info;
 
 use crate::auth::{auth_middleware, AuthConfig};
-use crate::rate_limiter::RateLimiter;
+use crate::rate_limiter::{rate_limit_middleware, RateLimiter};
 use crate::session_manager::SessionManager;
 use crate::types::*;
 
@@ -45,6 +46,7 @@ pub fn create_router(state: AppState) -> Router {
     };
 
     let auth_config = state.auth_config.clone();
+    let rate_limiter = state.rate_limiter.clone();
 
     Router::new()
         .route("/health", get(health_check))
@@ -55,6 +57,13 @@ pub fn create_router(state: AppState) -> Router {
         )
         .route("/api/v1/sessions/{id}/messages", post(send_message))
         .route("/ws/sessions/{id}", get(ws_upgrade))
+        // Rate limiter runs after auth (innermost = last in request pipeline)
+        .layer(middleware::from_fn(
+            move |addr: ConnectInfo<SocketAddr>, req, next| {
+                let rl = rate_limiter.clone();
+                async move { rate_limit_middleware(addr, rl, req, next).await }
+            },
+        ))
         .layer(middleware::from_fn(move |req, next| {
             auth_middleware(auth_config.clone(), req, next)
         }))
@@ -71,9 +80,12 @@ pub async fn start_server(state: AppState, host: &str, port: u16) -> anyhow::Res
     info!(addr = %addr, "Starting gateway server");
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        router.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     info!("Gateway server stopped");
     Ok(())
@@ -128,9 +140,7 @@ async fn create_session(
     }
 }
 
-async fn list_sessions(
-    State(state): State<AppState>,
-) -> Json<Vec<String>> {
+async fn list_sessions(State(state): State<AppState>) -> Json<Vec<String>> {
     Json(state.session_manager.list_sessions().await)
 }
 
@@ -278,7 +288,10 @@ async fn handle_ws_connection(socket: WebSocket, session_id: String, state: AppS
                 break;
             }
             Err(_) => {
-                info!("WebSocket idle timeout ({}s), closing connection", WS_IDLE_TIMEOUT.as_secs());
+                info!(
+                    "WebSocket idle timeout ({}s), closing connection",
+                    WS_IDLE_TIMEOUT.as_secs()
+                );
                 break;
             }
         }

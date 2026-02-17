@@ -1,8 +1,8 @@
 use axum::extract::ConnectInfo;
+use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::extract::Request;
 use dashmap::DashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -48,9 +48,8 @@ impl RateLimiter {
         let now = Instant::now();
         let window = std::time::Duration::from_secs(60);
 
-        self.buckets.retain(|_, (last_reset, _)| {
-            now.duration_since(*last_reset) < window
-        });
+        self.buckets
+            .retain(|_, (last_reset, _)| now.duration_since(*last_reset) < window);
     }
 }
 
@@ -61,6 +60,11 @@ pub async fn rate_limit_middleware(
     request: Request,
     next: Next,
 ) -> Response {
+    // Skip rate limiting for health checks (used by load balancers)
+    if request.uri().path() == "/health" {
+        return next.run(request).await;
+    }
+
     let ip = addr.ip();
 
     if !rate_limiter.check(ip) {

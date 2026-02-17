@@ -40,10 +40,20 @@ pub enum ClientMessage {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionEvent {
-    AgentResponse { content: String },
-    ToolCall { name: String, input: serde_json::Value },
-    ToolResult { name: String, output: String },
-    Error { message: String },
+    AgentResponse {
+        content: String,
+    },
+    ToolCall {
+        name: String,
+        input: serde_json::Value,
+    },
+    ToolResult {
+        name: String,
+        output: String,
+    },
+    Error {
+        message: String,
+    },
 }
 
 /// API error response

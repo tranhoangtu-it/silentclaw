@@ -40,6 +40,25 @@ impl PluginHandle {
     ///
     /// Calls `_plugin_create()` with panic isolation, reconstructs the
     /// double-boxed `Box<dyn Plugin>` from the returned thin pointer.
+    ///
+    /// # Safety
+    ///
+    /// This method uses `unsafe` for two operations:
+    /// 1. `Library::new()` — loads a shared library; the library must be a valid
+    ///    Rust cdylib built with `declare_plugin!`.
+    /// 2. `Box::from_raw()` — reconstructs `Box<dyn Plugin>` from the thin pointer
+    ///    returned by `_plugin_create()`. This takes ownership, so the host drops
+    ///    the plugin via Rust's normal Drop. This is safe **only** when host and
+    ///    plugin share the same allocator (same Rust toolchain / workspace build).
+    ///    For separately-compiled plugins, call `_plugin_destroy()` instead.
+    ///
+    /// ## Panic Isolation
+    ///
+    /// `_plugin_create()` is called inside `catch_unwind(AssertUnwindSafe(...))`.
+    /// `AssertUnwindSafe` is sound here because:
+    /// - We do not access any mutable state from the host after a panic
+    /// - On panic, we return an error and the partially-constructed plugin is never used
+    /// - The `Library` handle is dropped normally (no leaked resources)
     pub fn load(path: &Path) -> Result<Self> {
         // Load the shared library
         let lib = unsafe { Library::new(path) }
@@ -83,6 +102,14 @@ impl PluginHandle {
 
     /// Call `plugin.shutdown()` with panic isolation, then drop the plugin.
     /// Returns Ok even if shutdown panics (logged as warning).
+    ///
+    /// ## Panic Isolation
+    ///
+    /// `plugin.shutdown()` is wrapped in `catch_unwind(AssertUnwindSafe(...))`.
+    /// `AssertUnwindSafe` is sound here because:
+    /// - After this call, `self` is consumed and dropped regardless of panic
+    /// - No host state is accessed after the catch_unwind boundary
+    /// - Plugin state may be inconsistent after panic, but it's immediately dropped
     pub fn shutdown_and_drop(mut self) {
         let result = catch_unwind(AssertUnwindSafe(|| self.plugin.shutdown()));
         match result {

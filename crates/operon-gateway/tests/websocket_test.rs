@@ -13,12 +13,12 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use operon_gateway::create_router;
-use test_helpers::make_test_state;
+use test_helpers::{make_test_state, with_connect_info};
 
 /// WebSocket upgrade requires specific headers. Without them, axum returns 400/upgrade required.
 #[tokio::test]
 async fn test_ws_upgrade_without_headers_rejected() {
-    let state = make_test_state();
+    let (state, _dir) = make_test_state();
     let app = create_router(state.clone());
 
     // Create a session first
@@ -28,6 +28,7 @@ async fn test_ws_upgrade_without_headers_rejected() {
         .header("content-type", "application/json")
         .body(Body::from(r#"{}"#))
         .unwrap();
+    let create_req = with_connect_info(create_req);
     let resp = app.oneshot(create_req).await.unwrap();
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -40,6 +41,7 @@ async fn test_ws_upgrade_without_headers_rejected() {
         .uri(format!("/ws/sessions/{}", sid))
         .body(Body::empty())
         .unwrap();
+    let req = with_connect_info(req);
 
     let resp = app.oneshot(req).await.unwrap();
     // Without proper WS upgrade headers, axum rejects the request
@@ -52,7 +54,7 @@ async fn test_ws_upgrade_without_headers_rejected() {
 /// recognized the request. A real 101 requires a live TCP connection.
 #[tokio::test]
 async fn test_ws_upgrade_route_reachable() {
-    let state = make_test_state();
+    let (state, _dir) = make_test_state();
     let app = create_router(state.clone());
 
     // Create session
@@ -62,6 +64,7 @@ async fn test_ws_upgrade_route_reachable() {
         .header("content-type", "application/json")
         .body(Body::from(r#"{}"#))
         .unwrap();
+    let create_req = with_connect_info(create_req);
     let resp = app.oneshot(create_req).await.unwrap();
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -79,6 +82,7 @@ async fn test_ws_upgrade_route_reachable() {
         .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
         .body(Body::empty())
         .unwrap();
+    let req = with_connect_info(req);
 
     let resp = app.oneshot(req).await.unwrap();
     // 426 = route matched, WS handler active, but oneshot can't complete upgrade
@@ -88,10 +92,14 @@ async fn test_ws_upgrade_route_reachable() {
 /// Session manager subscribe/broadcast works (unit-level test of the WS data path).
 #[tokio::test]
 async fn test_session_event_broadcast() {
-    let state = make_test_state();
+    let (state, _dir) = make_test_state();
 
     // Create session
-    let sid = state.session_manager.create(Some("ws-agent")).await.unwrap();
+    let sid = state
+        .session_manager
+        .create(Some("ws-agent"))
+        .await
+        .unwrap();
 
     // Subscribe
     let mut rx = state.session_manager.subscribe(&sid).await.unwrap();
@@ -114,7 +122,7 @@ async fn test_session_event_broadcast() {
 /// Subscribe to nonexistent session returns error.
 #[tokio::test]
 async fn test_subscribe_nonexistent_session() {
-    let state = make_test_state();
+    let (state, _dir) = make_test_state();
     let result = state.session_manager.subscribe("no-such-id").await;
     assert!(result.is_err());
 }

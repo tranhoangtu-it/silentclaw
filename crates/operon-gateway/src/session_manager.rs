@@ -65,17 +65,40 @@ impl SessionManager {
         Ok(session_id)
     }
 
-    /// Send message to agent, returns response text
+    /// Send message to agent, returns response text.
+    ///
+    /// Uses remove/insert pattern to avoid holding write lock during LLM call.
+    /// If two concurrent sends target the same session, the second gets "Session not found".
     pub async fn send_message(&self, session_id: &str, content: &str) -> Result<String> {
-        let mut sessions = self.sessions.write().await;
-        let session = sessions
-            .get_mut(session_id)
-            .ok_or_else(|| anyhow!("Session not found: {}", session_id))?;
+        // 1. Remove session from map (short write lock)
+        let mut session = {
+            let mut sessions = self.sessions.write().await;
+            sessions
+                .remove(session_id)
+                .ok_or_else(|| anyhow!("Session not found: {}", session_id))?
+        };
+        // Write lock released here
 
+        // 2. Process message without holding any lock
         session.last_active = Utc::now();
-        let response = session.agent.process_message(content).await?;
+        let response = session.agent.process_message(content).await;
 
-        // Broadcast response event
+        // 3. Re-insert session (short write lock) — even on error to prevent session loss
+        {
+            let mut sessions = self.sessions.write().await;
+            sessions.insert(session_id.to_string(), session);
+        }
+
+        // 3a. Detect if session was deleted during processing (event_bus removed)
+        if !self.event_buses.read().await.contains_key(session_id) {
+            // Session was deleted while we were processing; remove the orphan
+            self.sessions.write().await.remove(session_id);
+            return Err(anyhow!("Session deleted during message processing"));
+        }
+
+        // 4. Handle result and broadcast
+        let response = response?;
+
         if let Some(tx) = self.event_buses.read().await.get(session_id) {
             let _ = tx.send(SessionEvent::AgentResponse {
                 content: response.clone(),
@@ -86,10 +109,7 @@ impl SessionManager {
     }
 
     /// Get session info (non-mutable)
-    pub async fn get_session_info(
-        &self,
-        session_id: &str,
-    ) -> Result<(String, String, usize)> {
+    pub async fn get_session_info(&self, session_id: &str) -> Result<(String, String, usize)> {
         let sessions = self.sessions.read().await;
         let session = sessions
             .get(session_id)

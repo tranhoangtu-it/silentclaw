@@ -3,6 +3,7 @@ use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 
 /// Bearer token authentication state
 #[derive(Clone)]
@@ -48,7 +49,7 @@ pub async fn auth_middleware(
         Some(header) if header.starts_with("Bearer ") => {
             let token = &header[7..];
             if let Some(expected_token) = &auth_config.api_token {
-                if token == expected_token {
+                if token.as_bytes().ct_eq(expected_token.as_bytes()).into() {
                     return next.run(request).await;
                 }
             }

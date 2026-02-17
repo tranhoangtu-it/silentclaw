@@ -7,48 +7,46 @@ use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 
 use operon_gateway::create_router;
-use test_helpers::make_auth_test_state;
+use test_helpers::{make_auth_test_state, make_ratelimit_test_state, with_connect_info};
 
 // ── Auth Middleware ─────────────────────────────────────────────────────
 
 async fn auth_call(token: Option<&str>, state: &operon_gateway::AppState) -> StatusCode {
     let app = create_router(state.clone());
-    let mut builder = Request::builder()
-        .method("GET")
-        .uri("/api/v1/sessions");
+    let mut builder = Request::builder().method("GET").uri("/api/v1/sessions");
 
     if let Some(t) = token {
         builder = builder.header("Authorization", format!("Bearer {}", t));
     }
 
-    let req = builder.body(Body::empty()).unwrap();
+    let req = with_connect_info(builder.body(Body::empty()).unwrap());
     app.oneshot(req).await.unwrap().status()
 }
 
 #[tokio::test]
 async fn test_auth_missing_token_returns_401() {
-    let state = make_auth_test_state("secret-token");
+    let (state, _dir) = make_auth_test_state("secret-token");
     let status = auth_call(None, &state).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
 async fn test_auth_invalid_token_returns_401() {
-    let state = make_auth_test_state("secret-token");
+    let (state, _dir) = make_auth_test_state("secret-token");
     let status = auth_call(Some("wrong-token"), &state).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
 async fn test_auth_valid_token_returns_ok() {
-    let state = make_auth_test_state("secret-token");
+    let (state, _dir) = make_auth_test_state("secret-token");
     let status = auth_call(Some("secret-token"), &state).await;
     assert_eq!(status, StatusCode::OK);
 }
 
 #[tokio::test]
 async fn test_health_bypasses_auth() {
-    let state = make_auth_test_state("secret-token");
+    let (state, _dir) = make_auth_test_state("secret-token");
     let app = create_router(state);
 
     // No token, but /health should still succeed
@@ -57,6 +55,7 @@ async fn test_health_bypasses_auth() {
         .uri("/health")
         .body(Body::empty())
         .unwrap();
+    let req = with_connect_info(req);
 
     let status = app.oneshot(req).await.unwrap().status();
     assert_eq!(status, StatusCode::OK);
@@ -112,4 +111,22 @@ fn test_rate_limiter_cleanup() {
     limiter.check(ip);
     // cleanup should not panic and should retain recent entries
     limiter.cleanup();
+}
+
+#[tokio::test]
+async fn test_health_not_rate_limited() {
+    let (state, _dir) = make_ratelimit_test_state(1); // 1 req/min limit
+    let app = create_router(state);
+
+    // Health endpoint should bypass rate limiting entirely
+    for _ in 0..5 {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+        let req = with_connect_info(req);
+        let status = app.clone().oneshot(req).await.unwrap().status();
+        assert_eq!(status, StatusCode::OK, "/health should bypass rate limiter");
+    }
 }

@@ -25,6 +25,9 @@ pub struct PluginManifest {
     pub entry_point: String,
     #[serde(default)]
     pub dependencies: Vec<String>,
+    /// Optional plugin configuration passed to `Plugin::init()`
+    #[serde(default)]
+    pub config: serde_json::Value,
 }
 
 fn default_plugin_type() -> PluginType {

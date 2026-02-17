@@ -35,9 +35,7 @@ pub async fn execute(action: PluginAction) -> Result<()> {
             }
         }
         PluginAction::Load(path) => {
-            let manifest = operon_runtime::PluginManifest::load(
-                &path.join("plugin.toml"),
-            )?;
+            let manifest = operon_runtime::PluginManifest::load(&path.join("plugin.toml"))?;
             loader.load_plugin(&manifest, &path).await?;
             info!(plugin = %manifest.name, "Plugin loaded successfully");
             println!("Plugin '{}' loaded.", manifest.name);

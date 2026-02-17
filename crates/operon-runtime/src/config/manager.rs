@@ -72,9 +72,9 @@ impl<C: DeserializeOwned + Send + Sync + 'static> ConfigManager<C> {
             for result in rx {
                 match result {
                     Ok(events) => {
-                        let relevant = events.iter().any(|e| {
-                            e.kind == DebouncedEventKind::Any && e.path == config_path
-                        });
+                        let relevant = events
+                            .iter()
+                            .any(|e| e.kind == DebouncedEventKind::Any && e.path == config_path);
                         if !relevant {
                             continue;
                         }
@@ -95,7 +95,8 @@ impl<C: DeserializeOwned + Send + Sync + 'static> ConfigManager<C> {
                                 }
                                 Err(e) => {
                                     error!("Config parse failed: {}. Preserving old config.", e);
-                                    let _ = reload_tx.send(ConfigReloadEvent::Failure(e.to_string()));
+                                    let _ =
+                                        reload_tx.send(ConfigReloadEvent::Failure(e.to_string()));
                                 }
                             },
                             Err(e) => {

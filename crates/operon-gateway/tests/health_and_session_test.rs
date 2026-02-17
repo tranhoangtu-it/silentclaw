@@ -8,15 +8,11 @@ use http_body_util::BodyExt;
 use tower::ServiceExt;
 
 use operon_gateway::create_router;
-use test_helpers::make_test_state;
+use test_helpers::{make_test_state, with_connect_info};
 
 /// Helper: build a request and call the router, return (status, body_bytes).
-async fn call(
-    method: &str,
-    uri: &str,
-    body: Option<&str>,
-) -> (StatusCode, Vec<u8>) {
-    let state = make_test_state();
+async fn call(method: &str, uri: &str, body: Option<&str>) -> (StatusCode, Vec<u8>) {
+    let (state, _dir) = make_test_state();
     let app = create_router(state);
 
     let mut builder = Request::builder().method(method).uri(uri);
@@ -26,23 +22,30 @@ async fn call(
     } else {
         builder.body(Body::empty()).unwrap()
     };
+    let req = with_connect_info(req);
 
     let resp = app.oneshot(req).await.unwrap();
     let status = resp.status();
-    let bytes = resp.into_body().collect().await.unwrap().to_bytes().to_vec();
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .unwrap()
+        .to_bytes()
+        .to_vec();
     (status, bytes)
 }
 
 /// Stateful helper that reuses one AppState across multiple requests.
 struct TestApp {
     state: operon_gateway::AppState,
+    _dir: tempfile::TempDir,
 }
 
 impl TestApp {
     fn new() -> Self {
-        Self {
-            state: make_test_state(),
-        }
+        let (state, _dir) = make_test_state();
+        Self { state, _dir }
     }
 
     async fn call(&self, method: &str, uri: &str, body: Option<&str>) -> (StatusCode, Vec<u8>) {
@@ -54,9 +57,16 @@ impl TestApp {
         } else {
             builder.body(Body::empty()).unwrap()
         };
+        let req = with_connect_info(req);
         let resp = app.oneshot(req).await.unwrap();
         let status = resp.status();
-        let bytes = resp.into_body().collect().await.unwrap().to_bytes().to_vec();
+        let bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec();
         (status, bytes)
     }
 }
@@ -138,9 +148,7 @@ async fn test_delete_session() {
     let app = TestApp::new();
 
     // Create
-    let (_, body) = app
-        .call("POST", "/api/v1/sessions", Some(r#"{}"#))
-        .await;
+    let (_, body) = app.call("POST", "/api/v1/sessions", Some(r#"{}"#)).await;
     let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let sid = created["session_id"].as_str().unwrap();
 
@@ -159,9 +167,7 @@ async fn test_send_message_success() {
     let app = TestApp::new();
 
     // Create session
-    let (_, body) = app
-        .call("POST", "/api/v1/sessions", Some(r#"{}"#))
-        .await;
+    let (_, body) = app.call("POST", "/api/v1/sessions", Some(r#"{}"#)).await;
     let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let sid = created["session_id"].as_str().unwrap();
 
@@ -181,9 +187,7 @@ async fn test_message_too_large() {
     let app = TestApp::new();
 
     // Create session
-    let (_, body) = app
-        .call("POST", "/api/v1/sessions", Some(r#"{}"#))
-        .await;
+    let (_, body) = app.call("POST", "/api/v1/sessions", Some(r#"{}"#)).await;
     let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
     let sid = created["session_id"].as_str().unwrap();
 

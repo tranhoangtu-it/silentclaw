@@ -43,7 +43,17 @@ macro_rules! declare_plugin {
         }
 
         /// # Safety
-        /// `ptr` must be a pointer returned by `_plugin_create` from this plugin.
+        ///
+        /// `ptr` must be a pointer previously returned by `_plugin_create` from this
+        /// exact plugin build. Calling with any other pointer is undefined behavior.
+        ///
+        /// ## When to use
+        /// - **Same-workspace build:** Host drops plugin via Rust `Drop` (no need to call this)
+        /// - **Separately-compiled plugin:** Host MUST call `_plugin_destroy` to ensure
+        ///   deallocation uses the plugin's allocator, not the host's
+        ///
+        /// Currently SilentClaw only supports same-workspace plugins, so `_plugin_destroy`
+        /// is generated but not called. It exists for future cross-build support.
         #[no_mangle]
         pub unsafe extern "C" fn _plugin_destroy(ptr: *mut std::ffi::c_void) {
             if !ptr.is_null() {

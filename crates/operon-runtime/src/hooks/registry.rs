@@ -69,7 +69,11 @@ impl HookRegistry {
                     }
                 }
                 Err(_) => {
-                    warn!(hook = hook.name(), timeout_ms = timeout.as_millis(), "Hook timed out");
+                    warn!(
+                        hook = hook.name(),
+                        timeout_ms = timeout.as_millis(),
+                        "Hook timed out"
+                    );
                     if hook.critical() {
                         return Err(anyhow!("Critical hook '{}' timed out", hook.name()));
                     }
@@ -82,7 +86,10 @@ impl HookRegistry {
 
     /// Check if any hooks are registered for an event
     pub fn has_hooks(&self, event: &HookEvent) -> bool {
-        self.hooks.get(event).map(|h| !h.is_empty()).unwrap_or(false)
+        self.hooks
+            .get(event)
+            .map(|h| !h.is_empty())
+            .unwrap_or(false)
     }
 }
 
@@ -206,9 +213,7 @@ mod tests {
         let registry = HookRegistry::new();
         registry.register(Arc::new(AbortHook));
 
-        let result = registry
-            .trigger(make_ctx(HookEvent::ToolCallBefore))
-            .await;
+        let result = registry.trigger(make_ctx(HookEvent::ToolCallBefore)).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("aborted"));
     }

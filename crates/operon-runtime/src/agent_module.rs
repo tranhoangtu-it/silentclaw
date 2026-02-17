@@ -147,10 +147,9 @@ impl SessionStore {
     pub async fn save(&self, session: &Session) -> Result<()> {
         let path = self.base_path.join(format!("{}.json", session.id));
         let json = serde_json::to_string_pretty(session)?;
-        tokio::fs::write(&path, json).await.context(format!(
-            "Failed to save session: {:?}",
-            path
-        ))?;
+        tokio::fs::write(&path, json)
+            .await
+            .context(format!("Failed to save session: {:?}", path))?;
         Ok(())
     }
 
@@ -192,11 +191,7 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn new(
-        config: AgentConfig,
-        provider: Arc<dyn LLMProvider>,
-        runtime: Arc<Runtime>,
-    ) -> Self {
+    pub fn new(config: AgentConfig, provider: Arc<dyn LLMProvider>, runtime: Arc<Runtime>) -> Self {
         let session = Session::new(&config.name);
         Self {
             config,
@@ -300,7 +295,11 @@ impl Agent {
         for call in tool_calls {
             info!(tool = %call.name, id = %call.id, "Executing tool call");
 
-            let output = match self.runtime.execute_tool(&call.name, call.input.clone()).await {
+            let output = match self
+                .runtime
+                .execute_tool(&call.name, call.input.clone())
+                .await
+            {
                 Ok(value) => ToolResult {
                     tool_use_id: call.id.clone(),
                     output: value.to_string(),
@@ -394,15 +393,18 @@ mod tests {
         }
     }
 
-    fn make_runtime() -> Arc<Runtime> {
-        Arc::new(
+    fn make_runtime() -> (Arc<Runtime>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let runtime = Arc::new(
             Runtime::with_db(
-                &format!("/tmp/silentclaw-test-{}.db", uuid::Uuid::new_v4()),
+                db_path.to_str().unwrap(),
                 true,
                 std::time::Duration::from_secs(30),
             )
             .unwrap(),
-        )
+        );
+        (runtime, dir)
     }
 
     #[tokio::test]
@@ -416,7 +418,8 @@ mod tests {
             model: "mock".into(),
         }]));
 
-        let mut agent = Agent::new(AgentConfig::default(), llm, make_runtime());
+        let (runtime, _dir) = make_runtime();
+        let mut agent = Agent::new(AgentConfig::default(), llm, runtime);
         let result = agent.process_message("Hi").await.unwrap();
         assert_eq!(result, "Hello there!");
         assert_eq!(agent.session.message_count(), 2); // user + assistant
@@ -447,7 +450,7 @@ mod tests {
             },
         ]));
 
-        let runtime = make_runtime();
+        let (runtime, _dir) = make_runtime();
         // dry_run=true so tool returns dry-run output
         let mut agent = Agent::new(AgentConfig::default(), llm, runtime);
         let result = agent.process_message("What's the date?").await.unwrap();
@@ -478,7 +481,8 @@ mod tests {
             ..AgentConfig::default()
         };
 
-        let mut agent = Agent::new(config, llm, make_runtime());
+        let (runtime, _dir) = make_runtime();
+        let mut agent = Agent::new(config, llm, runtime);
         let result = agent.process_message("loop forever").await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Max iterations"));

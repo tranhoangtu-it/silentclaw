@@ -87,19 +87,18 @@ impl PluginLoader {
             PluginType::Native => {
                 let entry_path = manifest.resolve_entry_point(plugin_dir);
                 if !entry_path.exists() {
-                    return Err(anyhow!(
-                        "Plugin entry point not found: {:?}",
-                        entry_path
-                    ));
+                    return Err(anyhow!("Plugin entry point not found: {:?}", entry_path));
                 }
 
                 // Attempt FFI loading
                 match PluginHandle::load(&entry_path) {
                     Ok(mut handle) => {
-                        // Init with panic isolation
-                        let init_result = catch_unwind(AssertUnwindSafe(|| {
-                            handle.plugin_mut().init(serde_json::Value::Null)
-                        }));
+                        // Init with panic isolation.
+                        // AssertUnwindSafe is sound: on panic, we return Err and never
+                        // use the plugin handle. The handle is dropped, cleaning up resources.
+                        let config = manifest.config.clone();
+                        let init_result =
+                            catch_unwind(AssertUnwindSafe(|| handle.plugin_mut().init(config)));
 
                         match init_result {
                             Ok(Ok(())) => {
@@ -127,11 +126,18 @@ impl PluginLoader {
                             }
                             Ok(Err(e)) => {
                                 warn!(plugin = %manifest.name, error = %e, "Plugin init failed");
-                                return Err(anyhow!("Plugin '{}' init failed: {}", manifest.name, e));
+                                return Err(anyhow!(
+                                    "Plugin '{}' init failed: {}",
+                                    manifest.name,
+                                    e
+                                ));
                             }
                             Err(_) => {
                                 warn!(plugin = %manifest.name, "Plugin panicked during init");
-                                return Err(anyhow!("Plugin '{}' panicked during init", manifest.name));
+                                return Err(anyhow!(
+                                    "Plugin '{}' panicked during init",
+                                    manifest.name
+                                ));
                             }
                         }
                     }
@@ -206,20 +212,18 @@ mod tests {
     use std::io::Write;
     use std::time::Duration;
 
-    fn make_test_runtime() -> Arc<Runtime> {
-        Arc::new(
-            Runtime::with_db(
-                &format!("/tmp/silentclaw-plugin-test-{}.db", uuid::Uuid::new_v4()),
-                true,
-                Duration::from_secs(30),
-            )
-            .unwrap(),
-        )
+    fn make_test_runtime() -> (Arc<Runtime>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let runtime = Arc::new(
+            Runtime::with_db(db_path.to_str().unwrap(), true, Duration::from_secs(30)).unwrap(),
+        );
+        (runtime, dir)
     }
 
     #[tokio::test]
     async fn test_load_plugin_api_version_mismatch() {
-        let runtime = make_test_runtime();
+        let (runtime, _dir) = make_test_runtime();
         let hook_registry = Arc::new(HookRegistry::new());
         let loader = PluginLoader::new(runtime, hook_registry);
 
@@ -232,6 +236,7 @@ mod tests {
             plugin_type: PluginType::Native,
             entry_point: "./libtest.so".into(),
             dependencies: vec![],
+            config: serde_json::Value::Null,
         };
 
         let dir = tempfile::tempdir().unwrap();
@@ -242,7 +247,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_plugin_duplicate() {
-        let runtime = make_test_runtime();
+        let (runtime, _dir) = make_test_runtime();
         let hook_registry = Arc::new(HookRegistry::new());
         let loader = PluginLoader::new(runtime, hook_registry);
 
@@ -259,6 +264,7 @@ mod tests {
             plugin_type: PluginType::Native,
             entry_point: "./libtest.so".into(),
             dependencies: vec![],
+            config: serde_json::Value::Null,
         };
 
         loader.load_plugin(&manifest, dir.path()).await.unwrap();
@@ -269,7 +275,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_and_unload() {
-        let runtime = make_test_runtime();
+        let (runtime, _dir) = make_test_runtime();
         let hook_registry = Arc::new(HookRegistry::new());
         let loader = PluginLoader::new(runtime, hook_registry);
 
@@ -285,6 +291,7 @@ mod tests {
             plugin_type: PluginType::Native,
             entry_point: "./libtest.so".into(),
             dependencies: vec![],
+            config: serde_json::Value::Null,
         };
 
         loader.load_plugin(&manifest, dir.path()).await.unwrap();
@@ -300,7 +307,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_all_empty_dir() {
-        let runtime = make_test_runtime();
+        let (runtime, _dir) = make_test_runtime();
         let hook_registry = Arc::new(HookRegistry::new());
         let loader = PluginLoader::new(runtime, hook_registry);
 
@@ -311,7 +318,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_all_with_plugin() {
-        let runtime = make_test_runtime();
+        let (runtime, _dir) = make_test_runtime();
         let hook_registry = Arc::new(HookRegistry::new());
         let loader = PluginLoader::new(runtime, hook_registry);
 
