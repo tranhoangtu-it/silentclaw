@@ -2,6 +2,7 @@ pub mod agent_module;
 pub mod config;
 pub mod hooks;
 pub mod llm;
+pub mod memory;
 pub mod plugin;
 pub mod replay;
 pub mod runtime;

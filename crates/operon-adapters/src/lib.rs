@@ -1,6 +1,7 @@
 pub mod apply_patch_tool;
 pub mod diff_parser;
 pub mod edit_file_tool;
+pub mod memory_search_tool;
 pub mod python_adapter;
 pub mod read_file_tool;
 pub mod shell_tool;
@@ -9,6 +10,7 @@ pub mod write_file_tool;
 
 pub use apply_patch_tool::ApplyPatchTool;
 pub use edit_file_tool::EditFileTool;
+pub use memory_search_tool::MemorySearchTool;
 pub use python_adapter::PyAdapter;
 pub use read_file_tool::ReadFileTool;
 pub use shell_tool::ShellTool;

@@ -13,6 +13,8 @@ pub struct Config {
     pub tools: ToolsConfig,
     #[serde(default)]
     pub llm: LlmConfig,
+    #[serde(default)]
+    pub memory: MemoryConfig,
 }
 
 fn default_config_version() -> u32 {
@@ -171,6 +173,56 @@ impl Default for PythonConfig {
     }
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+pub struct MemoryConfig {
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Path to SQLite database for memory index
+    #[serde(default = "default_memory_db_path")]
+    pub db_path: String,
+
+    /// Embedding provider: "openai" or "voyage"
+    #[serde(default = "default_embedding_provider")]
+    pub embedding_provider: String,
+
+    /// Embedding model name
+    #[serde(default = "default_embedding_model")]
+    pub embedding_model: String,
+
+    /// Auto-reindex on file changes
+    #[serde(default = "default_auto_reindex")]
+    pub auto_reindex: bool,
+}
+
+fn default_memory_db_path() -> String {
+    "~/.silentclaw/memory.db".to_string()
+}
+
+fn default_embedding_provider() -> String {
+    "openai".to_string()
+}
+
+fn default_embedding_model() -> String {
+    "text-embedding-3-small".to_string()
+}
+
+fn default_auto_reindex() -> bool {
+    true
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            db_path: default_memory_db_path(),
+            embedding_provider: default_embedding_provider(),
+            embedding_model: default_embedding_model(),
+            auto_reindex: default_auto_reindex(),
+        }
+    }
+}
+
 impl Config {
     /// Create a default config (used as initial value for ConfigManager)
     pub fn default_config() -> Self {
@@ -188,6 +240,7 @@ impl Config {
                 timeouts: HashMap::new(),
             },
             llm: LlmConfig::default(),
+            memory: MemoryConfig::default(),
         }
     }
 

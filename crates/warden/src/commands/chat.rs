@@ -1,7 +1,7 @@
 use crate::cli::ExecutionMode;
 use crate::config::Config;
 use anyhow::{anyhow, Result};
-use operon_adapters::{register_filesystem_tools, register_shell_tool};
+use operon_adapters::{register_filesystem_tools, register_shell_tool, MemorySearchTool};
 use operon_runtime::{
     Agent, AgentConfig, AnthropicClient, ConfigManager, ConfigReloadEvent, LLMProvider,
     OpenAIClient, ProviderChain, Runtime, SessionStore,
@@ -51,6 +51,43 @@ pub async fn execute(
             PathBuf::from(&config.tools.filesystem.workspace),
             config.tools.filesystem.max_file_size_mb,
         )?;
+    }
+
+    // Initialize memory search if enabled
+    if config.memory.enabled {
+        let db_path = shellexpand::tilde(&config.memory.db_path).to_string();
+        let db_path = PathBuf::from(&db_path);
+        if let Some(parent) = db_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+
+        let embedding_key = std::env::var("OPENAI_API_KEY")
+            .or_else(|_| std::env::var("EMBEDDING_API_KEY"))
+            .unwrap_or_default();
+
+        if !embedding_key.is_empty() {
+            let embedder = Arc::new(
+                operon_runtime::memory::embedding::OpenAIEmbedding::new(&embedding_key),
+            );
+            let workspace = PathBuf::from(&config.tools.filesystem.workspace);
+            let manager = Arc::new(
+                operon_runtime::memory::MemoryManager::new(&db_path, workspace, embedder)?,
+            );
+
+            if config.memory.auto_reindex {
+                let watcher_handle = manager.start_indexing().await?;
+                // Keep watcher alive for the duration of the process
+                tokio::spawn(async move { let _ = watcher_handle.await; });
+            }
+
+            runtime.register_tool(
+                "memory_search".into(),
+                Arc::new(MemorySearchTool::new(manager)),
+            )?;
+            info!("Memory search enabled");
+        } else {
+            tracing::warn!("Memory enabled but no embedding API key found (OPENAI_API_KEY)");
+        }
     }
 
     // Build agent config
