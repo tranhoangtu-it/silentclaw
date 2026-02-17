@@ -3,9 +3,14 @@ use crate::config::Config;
 use anyhow::{anyhow, Result};
 use operon_adapters::{register_filesystem_tools, register_shell_tool, MemorySearchTool};
 use operon_runtime::{
-    Agent, AgentConfig, AnthropicClient, ConfigManager, ConfigReloadEvent, LLMProvider,
-    OpenAIClient, ProviderChain, Runtime, SessionStore,
+    Agent, AgentConfig, AnthropicClient, ConfigManager, ConfigReloadEvent, GeminiClient,
+    LLMProvider, OpenAIClient, ProviderChain, Runtime, SessionStore, ToolPolicyPipeline,
 };
+use operon_runtime::tool_policy::layers::{
+    AuditLogLayer, DryRunGuardLayer, InputValidationLayer, PermissionCheckLayer, RateLimitLayer,
+    TimeoutEnforceLayer, ToolExistenceLayer,
+};
+use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -34,7 +39,7 @@ pub async fn execute(
 
     // Create runtime and register tools
     let default_timeout = Duration::from_secs(config.runtime.timeout_secs);
-    let runtime = Arc::new(Runtime::new(dry_run, default_timeout)?);
+    let mut runtime = Arc::new(Runtime::new(dry_run, default_timeout)?);
 
     if config.tools.shell.enabled {
         register_shell_tool(
@@ -88,6 +93,50 @@ pub async fn execute(
         } else {
             tracing::warn!("Memory enabled but no embedding API key found (OPENAI_API_KEY)");
         }
+    }
+
+    // Build tool policy pipeline if enabled
+    if config.tool_policy.enabled {
+        let tool_names = runtime.tool_names();
+        let mut pipeline = ToolPolicyPipeline::new()
+            .add_layer(Box::new(ToolExistenceLayer::new(tool_names)));
+
+        if config.tool_policy.permission_enabled {
+            pipeline = pipeline.add_layer(Box::new(PermissionCheckLayer::new(
+                HashMap::new(), // Use default per-tool permissions
+            )));
+        }
+
+        if config.tool_policy.rate_limit_enabled {
+            pipeline = pipeline.add_layer(Box::new(RateLimitLayer::new(
+                config.tool_policy.max_calls_per_minute,
+            )));
+        }
+
+        if config.tool_policy.input_validation_enabled {
+            pipeline = pipeline.add_layer(Box::new(InputValidationLayer::new(
+                HashMap::new(), // TODO: populate from runtime tool schemas
+            )));
+        }
+
+        if config.tool_policy.dry_run_guard_enabled {
+            pipeline = pipeline.add_layer(Box::new(DryRunGuardLayer::new(
+                config.tool_policy.dry_run_bypass_tools.clone(),
+            )));
+        }
+
+        if config.tool_policy.audit_enabled {
+            pipeline = pipeline.add_layer(Box::new(AuditLogLayer::new()));
+        }
+
+        pipeline = pipeline.add_layer(Box::new(TimeoutEnforceLayer::new()));
+
+        // set_policy requires &mut, so get_mut from Arc
+        Arc::get_mut(&mut runtime)
+            .expect("Runtime should have single owner at this point")
+            .set_policy(pipeline);
+
+        info!("Tool policy pipeline enabled");
     }
 
     // Build agent config
@@ -197,10 +246,40 @@ pub fn build_provider(config: &Config) -> Result<Arc<dyn LLMProvider>> {
         Some(config.llm.openai_api_key.clone())
     };
 
+    let gemini_key = if config.llm.gemini_api_key.is_empty() {
+        std::env::var("GOOGLE_API_KEY").ok()
+    } else {
+        Some(config.llm.gemini_api_key.clone())
+    };
+
     let mut providers: Vec<Arc<dyn LLMProvider>> = Vec::new();
+
+    // Helper: push Gemini as fallback provider
+    let push_gemini_fallback = |providers: &mut Vec<Arc<dyn LLMProvider>>,
+                                 key: &Option<String>| {
+        if let Some(key) = key {
+            providers.push(Arc::new(GeminiClient::new(key)));
+        }
+    };
 
     // Primary provider first based on config
     match config.llm.provider.as_str() {
+        "gemini" => {
+            if let Some(key) = &gemini_key {
+                let mut client = GeminiClient::new(key);
+                if !config.llm.model.is_empty() {
+                    client = client.with_model(&config.llm.model);
+                }
+                providers.push(Arc::new(client));
+            }
+            // Fallbacks: anthropic, then openai
+            if let Some(key) = &anthropic_key {
+                providers.push(Arc::new(AnthropicClient::new(key)));
+            }
+            if let Some(key) = &openai_key {
+                providers.push(Arc::new(OpenAIClient::new(key)));
+            }
+        }
         "openai" => {
             if let Some(key) = &openai_key {
                 let mut client = OpenAIClient::new(key);
@@ -212,6 +291,7 @@ pub fn build_provider(config: &Config) -> Result<Arc<dyn LLMProvider>> {
             if let Some(key) = &anthropic_key {
                 providers.push(Arc::new(AnthropicClient::new(key)));
             }
+            push_gemini_fallback(&mut providers, &gemini_key);
         }
         _ => {
             // Default: anthropic first
@@ -225,12 +305,13 @@ pub fn build_provider(config: &Config) -> Result<Arc<dyn LLMProvider>> {
             if let Some(key) = &openai_key {
                 providers.push(Arc::new(OpenAIClient::new(key)));
             }
+            push_gemini_fallback(&mut providers, &gemini_key);
         }
     }
 
     if providers.is_empty() {
         return Err(anyhow!(
-            "No LLM provider configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY environment variable."
+            "No LLM provider configured. Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or GOOGLE_API_KEY environment variable."
         ));
     }
 

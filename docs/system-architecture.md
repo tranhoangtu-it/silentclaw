@@ -1,13 +1,13 @@
 # SilentClaw System Architecture
 
 **Last Updated:** 2026-02-18
-**Version:** 4.0.0-phase-4
-**Status:** Phase 4 Complete - Memory & Search System
+**Version:** 5.0.0-phase-5
+**Status:** Phase 5 Complete - Gemini Provider + Tool Policy Pipeline
 
 ## Overview
 
 SilentClaw is a comprehensive agent platform combining:
-- **LLM Integration** - Anthropic/OpenAI with streaming (SSE) and failover chains
+- **LLM Integration** - 3 providers (Anthropic/OpenAI/Gemini) with streaming (SSE) and failover chains
 - **Agent Loop** - Conversation state + tool calling + auto-iteration
 - **Streaming** - Native SSE parsers with 1MB buffer protection
 - **Config Hot-Reload** - File watcher for live updates without restart
@@ -15,6 +15,8 @@ SilentClaw is a comprehensive agent platform combining:
 - **Plugin System** - Dynamic tool/hook loading with API versioning
 - **Gateway** - HTTP/WebSocket API for remote access
 - **Async Runtime** - Tokio-based execution engine
+- **Tool Security** - 7-layer policy pipeline (authorization, validation, rate-limiting, audit)
+- **Memory System** - Hybrid search (vector + FTS5) for workspace indexing
 
 Architecture evolution:
 
@@ -26,6 +28,7 @@ v2.1: + streaming (SSE) + config hot-reload (Phase 1)
 v2.2: + plugin FFI + gateway integration tests (Phase 2)
 v2.3: + filesystem tools (read/write/edit/patch) with workspace scoping (Phase 3)
 v4.0: + memory system (hybrid search: vector + FTS5, RRF merge) (Phase 4)
+v5.0: + Gemini LLM provider + 7-layer tool policy pipeline (Phase 5)
 ```
 
 ## Architecture Layers (10 Layers)
@@ -58,6 +61,16 @@ pub trait LLMProvider: Send + Sync {
   - Function calling format
   - Vision/multimodal base64 encoding
   - Native streaming via `generate_stream()` override
+
+- **GeminiClient** (NEW - Phase 5) - Google Gemini API with SSE streaming
+  - Function declarations format (similar to OpenAI)
+  - Vision via inlineData base64 encoding
+  - HTTP timeouts: 120s request, 10s connect
+  - Auth: API key as query parameter `?key=API_KEY`
+  - Models: gemini-2.0-flash (default), gemini-2.5-pro
+  - Base URL: `https://generativelanguage.googleapis.com/v1beta`
+  - Endpoints: `:generateContent` (non-streaming), `:streamGenerateContent?alt=sse` (streaming)
+  - Native streaming via `generate_stream()` override using `parse_gemini_sse()`
 
 - **ProviderChain (Failover)** - Fallback logic with retry-after
   - Configurable list of providers
@@ -95,6 +108,15 @@ pub fn parse_openai_sse(data: &str) -> Vec<StreamChunk>
 - `choices[].delta.tool_calls[].function.arguments` → ToolCallDelta
 - `choices[].finish_reason` → Done with stop_reason
 
+**Gemini Streaming Events (NEW - Phase 5):**
+- `candidates[].content.parts[].text` → TextDelta
+- `candidates[].content.parts[].functionCall` → ToolCallStart + ToolCallDelta
+- `candidates[].finishReason` → Done with stop_reason mapping:
+  - `"STOP"` → `StopReason::EndTurn`
+  - `"MAX_TOKENS"` → `StopReason::MaxTokens`
+  - `"TOOL_USE"` or contains functionCall → `StopReason::ToolUse`
+- `usageMetadata` → Usage (promptTokenCount + candidatesTokenCount)
+
 **Features:**
 - Async request/response
 - Structured message format with roles
@@ -104,8 +126,9 @@ pub fn parse_openai_sse(data: &str) -> Vec<StreamChunk>
 - Cumulative usage tracking
 - Streaming with 1MB buffer limit (OOM protection)
 - Default fallback for non-streaming providers
+- 3 provider failover chain (Anthropic → OpenAI → Gemini)
 
-**Tests:** 68 total (17 streaming + 12 provider fallback + 14 Anthropic + 12 OpenAI + 5 failover + 8 others)
+**Tests:** 78 total (22 streaming: 6 Anthropic + 6 OpenAI + 5 Gemini + 5 shared tests, 12 provider fallback, 14 Anthropic, 12 OpenAI, 5 Gemini, 5 failover, 8 others)
 
 ### Layer 2: Agent Loop (Production Hardened)
 
@@ -450,9 +473,115 @@ pub async fn start_server(
 - Wired into Axum router middleware (now active)
 - Returns 429 Too Many Requests when limited
 
-### Layer 7: Core Runtime (operon-runtime)
+### Layer 7: Tool Policy Pipeline (NEW - Phase 5)
 
-**Purpose:** Async Tool trait and orchestration engine
+**Purpose:** 7-layer authorization/validation pipeline executed before every tool.execute() call
+
+**ToolPolicyPipeline:**
+```rust
+pub struct ToolPolicyPipeline {
+    layers: Vec<Box<dyn PolicyLayer>>,
+}
+
+pub enum PolicyDecision {
+    Allow,
+    Deny(String),
+}
+
+pub struct PolicyContext {
+    pub tool_name: String,
+    pub input: Value,
+    pub caller_permission: PermissionLevel,
+    pub dry_run: bool,
+    pub session_id: Option<String>,
+}
+```
+
+**Pipeline Flow:**
+```
+Agent calls runtime.execute_tool(name, input)
+    ↓
+ToolPolicyPipeline::evaluate(context)
+    ├── Layer 1: ToolExistence     - Is the tool registered?
+    ├── Layer 2: PermissionCheck   - Does caller have required permission level?
+    ├── Layer 3: RateLimit         - Per-tool call rate within window?
+    ├── Layer 4: InputValidation   - Does input match tool's JSON schema?
+    ├── Layer 5: DryRunGuard       - Is tool allowed in current execution mode?
+    ├── Layer 6: AuditLog          - Log tool call attempt (always Allow)
+    └── Layer 7: TimeoutEnforce    - Set per-tool timeout wrapper
+    ↓
+tool.execute(input)  // Only if all layers Allow
+```
+
+**Layer Details:**
+
+1. **ToolExistence** - Validates tool is registered in runtime
+   - Deny: "tool not found: {name}"
+
+2. **PermissionCheck** - Hierarchical permission enforcement
+   - Hierarchy: Read < Write < Execute < Network < Admin
+   - Deny: "insufficient permission for tool {name}"
+
+3. **RateLimit** - Token bucket per tool
+   - DashMap-based concurrent tracking
+   - Configurable max_calls_per_minute
+   - Deny: "rate limit exceeded for tool {name}"
+
+4. **InputValidation** - Schema validation
+   - Checks required fields present
+   - Type matching against tool schema
+   - Deny: "invalid input for tool {name}: {reason}"
+
+5. **DryRunGuard** - Execution mode safety
+   - If dry_run=true, only allows Read permission tools
+   - Configurable bypass list (e.g., read_file, memory_search)
+   - Deny: "tool {name} blocked in dry-run mode"
+
+6. **AuditLog** - Audit trail (always Allow, side-effect only)
+   - Structured logging via tracing::info!
+   - Fields: tool_name, session_id, timestamp, permission_level
+
+7. **TimeoutEnforce** - Timeout enforcement (always Allow)
+   - Sets per-tool timeout metadata
+   - Consumed by runtime during execution
+
+**Configuration:**
+```toml
+[tool_policy]
+enabled = true
+
+[tool_policy.permission]
+enabled = true
+default_level = "execute"
+
+[tool_policy.rate_limit]
+enabled = false
+max_calls_per_minute = 60
+
+[tool_policy.input_validation]
+enabled = true
+
+[tool_policy.dry_run_guard]
+enabled = true
+bypass_tools = ["read_file", "memory_search"]
+
+[tool_policy.audit]
+enabled = true
+```
+
+**Features:**
+- Short-circuit on first Deny (fail-fast)
+- Zero overhead when disabled (runtime bool checks)
+- Extensible: custom layers via PolicyLayer trait
+- DashMap for lock-free concurrent rate limiting
+- Per-layer enable/disable configuration
+- Clear error messages with layer name + reason
+
+**Tests:** 12 tests (3 pipeline orchestration + 9 individual layer tests)
+
+### Layer 8: Core Runtime (operon-runtime)
+
+**Purpose:** Async Tool trait and orchestration engine with policy integration
 
 **Key Components:**
 
@@ -465,11 +594,13 @@ pub async fn start_server(
   }
   ```
 
-- **Runtime Struct** - Plan executor with async step orchestration
+- **Runtime Struct** - Plan executor with async step orchestration and policy integration
   - Tool registry (DashMap for lock-free concurrency)
   - Per-tool timeout configuration
   - Dry-run flag for safety
   - JSON structured logging via tracing
+  - Optional ToolPolicyPipeline (Phase 5) - evaluated before every tool.execute()
+  - Policy context includes tool_name, input, permission level, dry_run, session_id
 
 - **Storage Module** - Persistent step result storage
   - Uses redb (actively maintained, pure Rust)
@@ -585,6 +716,10 @@ Excluded: hidden files, node_modules/, target/, __pycache__/, binary files
 - No encryption (consider data policy for sensitive projects)
 
 ---
+
+### Layer 9: Memory Search Tool (operon-adapters)
+
+**Purpose:** LLM-callable interface for workspace file search (see Layer 9 Memory System above for backend details)
 
 ### Layer 10: Tool Adapters (operon-adapters)
 
@@ -775,6 +910,7 @@ Eliminates duplication in `chat.rs` and `serve.rs` (was ~20 lines each).
 - `SILENTCLAW_DRY_RUN` - Override dry_run
 - `ANTHROPIC_API_KEY` - Anthropic API key
 - `OPENAI_API_KEY` - OpenAI API key
+- `GOOGLE_API_KEY` - Google Gemini API key (Phase 5)
 
 **Configuration (Hardened):**
 ```toml
@@ -805,8 +941,11 @@ shell = 30
 python = 120
 
 [llm]
-provider = "anthropic"
+provider = "anthropic"         # Options: "anthropic", "openai", "gemini" (Phase 5)
 model = ""
+anthropic_api_key = ""
+openai_api_key = ""
+gemini_api_key = ""            # NEW - Phase 5
 
 [memory]                       # NEW - Phase 4
 enabled = false                # Opt-in system
@@ -814,6 +953,27 @@ db_path = "~/.silentclaw/memory.db"
 embedding_provider = "openai"  # text-embedding-3-small
 embedding_model = "text-embedding-3-small"
 auto_reindex = true            # Watch for file changes
+
+[tool_policy]                  # NEW - Phase 5
+enabled = true
+
+[tool_policy.permission]
+enabled = true
+default_level = "execute"      # read, write, execute, network, admin
+
+[tool_policy.rate_limit]
+enabled = false
+max_calls_per_minute = 60
+
+[tool_policy.input_validation]
+enabled = true
+
+[tool_policy.dry_run_guard]
+enabled = true
+bypass_tools = ["read_file", "memory_search"]
+
+[tool_policy.audit]
+enabled = true
 
 [gateway]
 bind = "127.0.0.1:8080"
@@ -1347,10 +1507,13 @@ cargo test --all
 
 ---
 
-**Phase 4 Completed:** 2026-02-18
-**Memory System:** Hybrid search (vector + FTS5), RRF merge, OpenAI embeddings, auto-reindex
-**New Modules:** 7 memory modules + 1 memory_search_tool, ~1000 LOC total
-**Test Coverage:** 110+ tests (hybrid_search has 3 unit tests, all passing)
+**Phase 5 Completed:** 2026-02-18
+**New Systems:**
+- Google Gemini LLM provider (third provider with SSE streaming, tool calling, vision)
+- 7-layer tool policy pipeline (authorization, validation, rate-limiting, audit)
+**New Modules:** 4 modules (gemini.rs + tool_policy/), ~865 LOC total
+**Modified Files:** 6 files (streaming.rs, config.rs, runtime.rs, chat.rs, lib.rs, llm/mod.rs)
+**Test Coverage:** 132 tests (22 new: 10 Gemini + 12 tool policy, all passing)
 **Code Quality:** 0 clippy warnings, 0 unsafe blocks, trait-based design
-**Performance:** <10ms FTS, ~200-600ms hybrid (including embedding API)
-**Scalability:** <10K docs (brute-force vector), millions with FTS5
+**Security:** Tool policy pipeline with permission check, rate limiting, input validation, audit logging
+**LLM Providers:** 3 providers (Anthropic, OpenAI, Gemini) with automatic failover

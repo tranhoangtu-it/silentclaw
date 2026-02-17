@@ -206,6 +206,17 @@ impl ModelInfo {
             max_output_tokens: 16_384,
         }
     }
+
+    pub fn gemini_flash() -> Self {
+        Self {
+            name: "gemini-2.0-flash".to_string(),
+            provider: "gemini".to_string(),
+            context_window: 1_048_576,
+            supports_vision: true,
+            supports_streaming: true,
+            max_output_tokens: 8_192,
+        }
+    }
 }
 
 impl Content {

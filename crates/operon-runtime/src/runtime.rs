@@ -1,5 +1,7 @@
 use crate::replay::{self, Fixture, StepRecord};
 use crate::scheduler::{self, ScheduledStep};
+use crate::tool::PermissionLevel;
+use crate::tool_policy::{PolicyContext, ToolPolicyPipeline};
 use crate::{Storage, Tool};
 use anyhow::{Context, Result};
 use dashmap::DashMap;
@@ -35,6 +37,8 @@ pub struct Runtime {
     state: AtomicU8,
     execution_context: ExecutionContext,
     max_parallel: usize,
+    /// Optional policy pipeline evaluated before every tool execution
+    policy: Option<ToolPolicyPipeline>,
 }
 
 impl Runtime {
@@ -56,6 +60,7 @@ impl Runtime {
             state: AtomicU8::new(STATE_IDLE),
             execution_context: ExecutionContext::Normal,
             max_parallel: 4,
+            policy: None,
         })
     }
 
@@ -69,6 +74,17 @@ impl Runtime {
     pub fn with_max_parallel(mut self, max: usize) -> Self {
         self.max_parallel = max.max(1);
         self
+    }
+
+    /// Set tool policy pipeline (builder pattern)
+    pub fn with_policy(mut self, pipeline: ToolPolicyPipeline) -> Self {
+        self.policy = Some(pipeline);
+        self
+    }
+
+    /// Set tool policy pipeline (mutable reference, for use after Arc creation)
+    pub fn set_policy(&mut self, pipeline: ToolPolicyPipeline) {
+        self.policy = Some(pipeline);
     }
 
     /// Register a tool. Fails if runtime is currently executing a plan.
@@ -335,6 +351,18 @@ impl Runtime {
 
     /// Execute a single tool by name (used by Agent loop)
     pub async fn execute_tool(&self, tool_name: &str, input: Value) -> Result<Value> {
+        // Policy pipeline evaluation (if configured)
+        if let Some(ref policy) = self.policy {
+            let ctx = PolicyContext {
+                tool_name: tool_name.to_string(),
+                input: input.clone(),
+                caller_permission: PermissionLevel::Execute,
+                dry_run: self.dry_run,
+                session_id: None,
+            };
+            policy.evaluate(&ctx)?;
+        }
+
         let tool = self
             .tools
             .get(tool_name)

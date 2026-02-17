@@ -1,8 +1,8 @@
 # SilentClaw Codebase Summary
 
 **Generated:** 2026-02-18
-**Version:** 4.0.0-phase-4
-**Status:** Phase 4 Complete + Memory & Search System
+**Version:** 5.0.0-phase-5
+**Status:** Phase 5 Complete + Gemini Provider + Tool Policy Pipeline
 
 ## Quick Reference
 
@@ -12,19 +12,69 @@
 | **Architecture** | Modular workspace (5 crates + SDK) |
 | **Crates** | 5 production crates + 1 SDK crate |
 | **CLI Commands** | 5 (run-plan, chat, serve, plugin, init) |
-| **Test Coverage** | 110+ tests (0 failures) |
+| **Test Coverage** | 132 tests (22 new in Phase 5, 0 failures) |
 | **Clippy Warnings** | 0 |
 | **Code Quality** | Clean, zero technical debt |
 | **Main Binary** | `warden` (action orchestrator + agent + server) |
 | **Core Libraries** | operon-runtime, operon-gateway, operon-plugin-sdk |
 | **Tool Adapters** | `operon-adapters` (Python + Shell + Filesystem + Memory Search) |
-| **Streaming Support** | SSE streaming (Anthropic + OpenAI), 1MB buffer protection, UTF-8 safe |
+| **Streaming Support** | SSE streaming (Anthropic + OpenAI + Gemini), 1MB buffer protection, UTF-8 safe |
+| **LLM Providers** | 3 providers (Anthropic, OpenAI, Gemini) with failover chain |
+| **Tool Security** | 7-layer policy pipeline (existence, permission, rate-limit, validation, dry-run, audit, timeout) |
 | **Config Reload** | File watcher + broadcast channel, live updates without restart |
 | **Memory System** | NEW: Hybrid search (vector + FTS5), RRF merge, OpenAI embeddings, file watcher |
 | **Vector Store** | SQLite-backed brute-force cosine similarity (<10K docs) |
 | **Full-Text Search** | SQLite FTS5 with BM25 ranking and hash-based cache |
 | **Session Manager** | Race condition fixed: orphan session detection after re-insert |
 | **Health Endpoint** | Excluded from rate limiting (LB health checks not throttled) |
+
+## Phase 5 Implementation Summary
+
+**Completed Features:**
+
+1. **Google Gemini LLM Provider** - Third provider (after Anthropic/OpenAI) following existing LLMProvider trait pattern
+   - File: `crates/operon-runtime/src/llm/gemini.rs` (~300 LOC)
+   - SSE streaming via parse_gemini_sse() in streaming.rs
+   - Supports text generation, tool/function calling, vision
+   - Integrated into ProviderChain failover
+   - Config: `gemini_api_key` + `GOOGLE_API_KEY` env override
+   - API: Uses Google Generative AI REST API (v1beta)
+   - Models: gemini-2.0-flash (default), gemini-2.5-pro
+   - Auth: API key as query parameter `?key=API_KEY`
+
+2. **7-Layer Tool Policy Pipeline** - Authorization/validation before every tool.execute()
+   - Module: `crates/operon-runtime/src/tool_policy/` (3 files, ~565 LOC)
+   - Layers (evaluated in order, short-circuit on first deny):
+     1. ToolExistence - Is the tool registered?
+     2. PermissionCheck - Does caller have required permission level?
+     3. RateLimit - Per-tool call rate within window?
+     4. InputValidation - Does input match tool's JSON schema?
+     5. DryRunGuard - Is tool allowed in current execution mode?
+     6. AuditLog - Log tool call attempt (always Allow, side-effect only)
+     7. TimeoutEnforce - Set per-tool timeout wrapper
+   - Configurable per-layer via `[tool_policy]` TOML section
+   - Integrated into Runtime.execute_tool() before tool execution
+   - Zero overhead when disabled (runtime bool checks)
+   - Extensible: custom policy layers via PolicyLayer trait
+
+3. **Test Results:** 132 tests (22 new), 0 clippy warnings
+   - Gemini: 10 new tests (SSE parsing, request/response format, tool calling)
+   - Tool Policy: 12 new tests (pipeline orchestration, individual layers)
+   - All existing tests still passing
+
+**Files Created (Phase 5):**
+- `crates/operon-runtime/src/llm/gemini.rs` - GeminiClient implementation (~300 LOC)
+- `crates/operon-runtime/src/tool_policy/mod.rs` - PolicyLayer trait + ToolPolicyPipeline (~80 LOC)
+- `crates/operon-runtime/src/tool_policy/layers.rs` - 7 layer implementations (~335 LOC)
+- `crates/operon-runtime/src/tool_policy/config.rs` - ToolPolicyConfig struct (~150 LOC)
+
+**Files Modified (Phase 5):**
+- `crates/operon-runtime/src/llm/streaming.rs` - Added parse_gemini_sse() (~50 LOC added)
+- `crates/operon-runtime/src/llm/mod.rs` - Added pub mod gemini
+- `crates/operon-runtime/src/lib.rs` - Re-exported GeminiClient + tool_policy module
+- `crates/operon-runtime/src/runtime.rs` - Integrated ToolPolicyPipeline
+- `crates/warden/src/config.rs` - Added ToolPolicyConfig + gemini_api_key
+- `crates/warden/src/commands/chat.rs` - Added "gemini" provider option
 
 ## Phase 4 Implementation Summary
 
@@ -107,7 +157,7 @@
 **Files Modified (Phase 4):**
 - `crates/warden/src/config.rs` - Added MemoryConfig struct + defaults
 
-**Test Results:** 110+ tests passing, 0 clippy warnings
+**Test Results (Phase 4):** 110 tests passing, 0 clippy warnings
 
 ## Code Review Hardening (Post-Phase 2 & Phase 3)
 
@@ -431,10 +481,11 @@ crates/
 │   └── src/
 │       ├── lib.rs
 │       ├── llm/
-│       │   ├── streaming.rs     (NEW - Phase 1)
+│       │   ├── streaming.rs     (NEW - Phase 1, UPDATED - Phase 5: parse_gemini_sse)
 │       │   ├── provider.rs       (UPDATED - Phase 1)
 │       │   ├── anthropic.rs      (UPDATED - Phase 1)
 │       │   ├── openai.rs         (UPDATED - Phase 1)
+│       │   ├── gemini.rs         (NEW - Phase 5: Google Gemini provider)
 │       │   ├── failover.rs       (UPDATED - Phase 1)
 │       │   └── types.rs
 │       ├── config/
@@ -455,6 +506,10 @@ crates/
 │       │   ├── text_search.rs    - SQLite FTS5 with BM25 ranking
 │       │   ├── hybrid_search.rs  - RRF merge algorithm (~70 LOC, 3 tests)
 │       │   └── indexer.rs        - DocumentIndexer + file watcher
+│       ├── tool_policy/          (NEW - Phase 5: Tool execution policy pipeline)
+│       │   ├── mod.rs            - PolicyLayer trait + ToolPolicyPipeline (~80 LOC)
+│       │   ├── layers.rs         - 7 layer implementations (~335 LOC)
+│       │   └── config.rs         - ToolPolicyConfig struct (~150 LOC)
 │       ├── tool.rs
 │       ├── runtime.rs
 │       ├── storage.rs
@@ -679,7 +734,7 @@ No restart required
 
 ## Test Summary
 
-**Total: 110 tests (100% passing, 0 failures)**
+**Total: 132 tests (100% passing, 0 failures)**
 
 | Component | Tests | File | Status |
 |-----------|-------|------|--------|
@@ -689,13 +744,17 @@ No restart required
 | Gateway WebSocket | 4 | operon-gateway/tests/websocket_test.rs | ✅ |
 | Streaming (Anthropic) | 6 | streaming.rs | ✅ |
 | Streaming (OpenAI) | 6 | streaming.rs | ✅ |
+| Streaming (Gemini) | 5 | streaming.rs | ✅ NEW Phase 5 |
 | Config Manager | 13 | config/manager.rs | ✅ |
 | Provider Fallback | 12 | llm/provider.rs | ✅ |
 | Anthropic Client | 14 | llm/anthropic.rs | ✅ |
 | OpenAI Client | 12 | llm/openai.rs | ✅ |
+| Gemini Client | 5 | llm/gemini.rs | ✅ NEW Phase 5 |
 | Failover Chain | 5 | llm/failover.rs | ✅ |
 | Filesystem Tools | 20 | operon-adapters/tests/filesystem_tools_test.rs | ✅ |
-| **Total** | **110** | — | **✅** |
+| Tool Policy Pipeline | 3 | tool_policy/mod.rs | ✅ NEW Phase 5 |
+| Tool Policy Layers | 9 | tool_policy/layers.rs | ✅ NEW Phase 5 |
+| **Total** | **132** | — | **✅** |
 
 ### Test Execution
 
@@ -822,11 +881,13 @@ See `/docs/known-limitations.md` for complete list. Key Phase 1 notes:
 
 ---
 
-**Phase 4 Completed:** 2026-02-18
-**New System:** Memory & Search (hybrid vector + FTS5, RRF merge)
-**New Files:** 8 modules + 1 tool (memory/) + MemoryConfig
-**Total LOC:** ~1000 lines (memory system core)
-**Tests:** 110+ tests (hybrid_search has 3 unit tests), 0 failures
-**Code Quality:** 0 clippy warnings, 0 unsafe blocks, type-safe trait design
-**Performance:** <10ms FTS, ~200-600ms hybrid (including embedding API)
-**Scalability:** <10K docs (brute-force vector), millions with FTS5
+**Phase 5 Completed:** 2026-02-18
+**New Systems:**
+- Gemini LLM provider (third provider with SSE streaming, tool calling, vision)
+- 7-layer tool policy pipeline (authorization, validation, rate-limiting, audit)
+**New Files:** 4 new modules (~865 LOC total)
+**Modified Files:** 6 files (streaming.rs, config.rs, runtime.rs, chat.rs, etc.)
+**Tests:** 132 tests (22 new for Phase 5), 0 failures
+**Code Quality:** 0 clippy warnings, 0 unsafe blocks, trait-based design
+**Security:** Tool policy pipeline with permission check, rate limiting, input validation, audit logging
+**LLM Providers:** 3 providers (Anthropic, OpenAI, Gemini) with automatic failover

@@ -303,6 +303,130 @@ pub fn parse_openai_sse(data: &str) -> Vec<StreamChunk> {
     chunks
 }
 
+// --- Gemini SSE parsing ---
+
+#[derive(Debug, Deserialize)]
+struct GeminiStreamResponse {
+    candidates: Option<Vec<GeminiCandidate>>,
+    #[serde(rename = "usageMetadata")]
+    usage_metadata: Option<GeminiUsageMetadata>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiCandidate {
+    content: Option<GeminiContent>,
+    #[serde(rename = "finishReason")]
+    finish_reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiContent {
+    parts: Option<Vec<GeminiPart>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiPart {
+    text: Option<String>,
+    #[serde(rename = "functionCall")]
+    function_call: Option<GeminiFunctionCall>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiFunctionCall {
+    name: String,
+    args: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiUsageMetadata {
+    #[serde(rename = "promptTokenCount")]
+    prompt_token_count: Option<u32>,
+    #[serde(rename = "candidatesTokenCount")]
+    candidates_token_count: Option<u32>,
+}
+
+/// Parse a Gemini SSE data string into StreamChunk(s).
+/// Gemini streams `candidates[0].content.parts[]` per event.
+pub fn parse_gemini_sse(data: &str) -> Vec<StreamChunk> {
+    let trimmed = data.trim();
+    let resp: GeminiStreamResponse = match serde_json::from_str(trimmed) {
+        Ok(r) => r,
+        Err(_) => return vec![],
+    };
+
+    let mut chunks = Vec::new();
+
+    let Some(candidates) = resp.candidates else {
+        return chunks;
+    };
+
+    for candidate in &candidates {
+        // Parse content parts
+        if let Some(ref content) = candidate.content {
+            if let Some(ref parts) = content.parts {
+                for part in parts {
+                    if let Some(ref text) = part.text {
+                        if !text.is_empty() {
+                            chunks.push(StreamChunk::TextDelta(text.clone()));
+                        }
+                    }
+                    if let Some(ref fc) = part.function_call {
+                        let call_id = format!("gemini_{}", fc.name);
+                        chunks.push(StreamChunk::ToolCallStart {
+                            id: call_id.clone(),
+                            name: fc.name.clone(),
+                        });
+                        if let Some(ref args) = fc.args {
+                            let args_str = args.to_string();
+                            if args_str != "null" {
+                                chunks.push(StreamChunk::ToolCallDelta {
+                                    id: call_id,
+                                    input_delta: args_str,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Parse finish reason
+        if let Some(ref reason) = candidate.finish_reason {
+            let stop_reason = match reason.as_str() {
+                "STOP" => StopReason::EndTurn,
+                "MAX_TOKENS" => StopReason::MaxTokens,
+                _ => {
+                    // Check if this event contains function calls -> ToolUse
+                    let has_fc = candidate
+                        .content
+                        .as_ref()
+                        .and_then(|c| c.parts.as_ref())
+                        .map(|parts| parts.iter().any(|p| p.function_call.is_some()))
+                        .unwrap_or(false);
+                    if has_fc {
+                        StopReason::ToolUse
+                    } else {
+                        StopReason::EndTurn
+                    }
+                }
+            };
+
+            let usage = resp
+                .usage_metadata
+                .as_ref()
+                .map(|u| Usage {
+                    input_tokens: u.prompt_token_count.unwrap_or(0),
+                    output_tokens: u.candidates_token_count.unwrap_or(0),
+                })
+                .unwrap_or_default();
+
+            chunks.push(StreamChunk::Done { stop_reason, usage });
+        }
+    }
+
+    chunks
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -422,5 +546,71 @@ mod tests {
             }
             other => panic!("Expected Done, got {:?}", other),
         }
+    }
+
+    // --- Gemini tests ---
+
+    #[test]
+    fn test_gemini_text_delta() {
+        let data = r#"{"candidates":[{"content":{"parts":[{"text":"Hello"}],"role":"model"}}]}"#;
+        let chunks = parse_gemini_sse(data);
+        assert_eq!(chunks.len(), 1);
+        match &chunks[0] {
+            StreamChunk::TextDelta(text) => assert_eq!(text, "Hello"),
+            other => panic!("Expected TextDelta, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_gemini_function_call() {
+        let data = r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"shell","args":{"cmd":"date"}}}],"role":"model"}}]}"#;
+        let chunks = parse_gemini_sse(data);
+        assert_eq!(chunks.len(), 2);
+        match &chunks[0] {
+            StreamChunk::ToolCallStart { name, .. } => assert_eq!(name, "shell"),
+            other => panic!("Expected ToolCallStart, got {:?}", other),
+        }
+        match &chunks[1] {
+            StreamChunk::ToolCallDelta { input_delta, .. } => {
+                assert!(input_delta.contains("cmd"));
+            }
+            other => panic!("Expected ToolCallDelta, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_gemini_finish_reason_stop() {
+        let data = r#"{"candidates":[{"content":{"parts":[],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}}"#;
+        let chunks = parse_gemini_sse(data);
+        assert_eq!(chunks.len(), 1);
+        match &chunks[0] {
+            StreamChunk::Done { stop_reason, usage } => {
+                assert_eq!(*stop_reason, StopReason::EndTurn);
+                assert_eq!(usage.input_tokens, 10);
+                assert_eq!(usage.output_tokens, 5);
+            }
+            other => panic!("Expected Done, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_gemini_finish_reason_max_tokens() {
+        let data = r#"{"candidates":[{"content":{"parts":[{"text":"truncat"}],"role":"model"},"finishReason":"MAX_TOKENS"}]}"#;
+        let chunks = parse_gemini_sse(data);
+        assert!(chunks.len() >= 2);
+        assert!(matches!(&chunks[0], StreamChunk::TextDelta(_)));
+        match chunks.last().unwrap() {
+            StreamChunk::Done { stop_reason, .. } => {
+                assert_eq!(*stop_reason, StopReason::MaxTokens);
+            }
+            other => panic!("Expected Done, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_gemini_empty_candidates() {
+        let data = r#"{"candidates":[]}"#;
+        let chunks = parse_gemini_sse(data);
+        assert!(chunks.is_empty());
     }
 }

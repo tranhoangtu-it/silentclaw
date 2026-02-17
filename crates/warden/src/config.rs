@@ -15,6 +15,8 @@ pub struct Config {
     pub llm: LlmConfig,
     #[serde(default)]
     pub memory: MemoryConfig,
+    #[serde(default)]
+    pub tool_policy: operon_runtime::tool_policy::config::ToolPolicyConfig,
 }
 
 fn default_config_version() -> u32 {
@@ -29,7 +31,10 @@ pub struct LlmConfig {
     /// OpenAI API key (or set OPENAI_API_KEY env)
     #[serde(default)]
     pub openai_api_key: String,
-    /// Default provider: "anthropic" or "openai"
+    /// Google Gemini API key (or set GOOGLE_API_KEY env)
+    #[serde(default)]
+    pub gemini_api_key: String,
+    /// Default provider: "anthropic", "openai", or "gemini"
     #[serde(default = "default_provider")]
     pub provider: String,
     /// Default model (empty = provider default)
@@ -46,6 +51,7 @@ impl Default for LlmConfig {
         Self {
             anthropic_api_key: String::new(),
             openai_api_key: String::new(),
+            gemini_api_key: String::new(),
             provider: default_provider(),
             model: String::new(),
         }
@@ -241,6 +247,7 @@ impl Config {
             },
             llm: LlmConfig::default(),
             memory: MemoryConfig::default(),
+            tool_policy: operon_runtime::tool_policy::config::ToolPolicyConfig::default(),
         }
     }
 
@@ -288,6 +295,11 @@ impl Config {
         if let Ok(key) = std::env::var("OPENAI_API_KEY") {
             if self.llm.openai_api_key.is_empty() {
                 self.llm.openai_api_key = key;
+            }
+        }
+        if let Ok(key) = std::env::var("GOOGLE_API_KEY") {
+            if self.llm.gemini_api_key.is_empty() {
+                self.llm.gemini_api_key = key;
             }
         }
     }
