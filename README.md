@@ -1,44 +1,73 @@
 # SilentClaw
 
-**SilentClaw** is a lightweight, high-performance local LLM action orchestrator written in Rust. It serves as a robust successor to OpenClaw, engineered for reliability, speed, and strict system control.
+[![Rust](https://img.shields.io/badge/Rust-1.70%2B-orange?logo=rust)](https://www.rust-lang.org/)
+[![Tests](https://img.shields.io/badge/Tests-142%20pass-brightgreen)](.)
+[![Clippy](https://img.shields.io/badge/Clippy-0%20warnings-brightgreen)](.)
+[![License](https://img.shields.io/badge/License-MIT%2FApache--2.0-blue)](.)
 
-SilentClaw preserves the semantic runtime loop of its predecessor but rebuilds the engine from the ground up to offer:
-*   **Safe-by-Default Execution:** Strict dry-run modes and permission controls.
-*   **High Concurrency:** Async-first runtime built on `tokio` for parallel tool execution.
-*   **Language Agnostic Tools:** seamless Python integration via a JSON-over-stdio adapter protocol.
-*   **Observability:** Structured JSON logging via `tracing` for production-grade monitoring.
+> A high-performance LLM action orchestrator written in Rust — multi-provider, tool-calling, memory-augmented agent runtime.
+
+SilentClaw is a next-generation successor to OpenClaw, engineered from the ground up in Rust for **reliability, speed, type safety, and strict system control**. It combines an async-first architecture with deterministic execution, seamless tool integration, and enterprise-grade security.
+
+---
+
+## ✨ Features
+
+- **Multi-LLM Support**: Anthropic Claude, OpenAI GPT, Google Gemini with automatic failover chain
+- **Agent Loop**: Full prompt → LLM → tool calls → execute → observe → repeat cycle
+- **Memory & Search**: Hybrid vector + FTS5 (BM25) with RRF merge, auto-reindex on file changes
+- **Tool Policy Pipeline**: 7-layer authorization (PermissionCheck, RateLimit, InputValidation, Sandbox, AuditLog, DryRun, Composite)
+- **Gateway**: REST + WebSocket with Bearer auth, rate limiting, CORS, input validation, graceful shutdown
+- **Plugin System**: FFI dynamic loading with SDK macro for custom extensions
+- **Filesystem Tools**: Workspace-scoped read/write/edit/patch with path traversal protection
+- **Record/Replay**: Deterministic testing fixtures for reproducible execution
+- **Parallel DAG**: Kahn's algorithm scheduler for concurrent task execution
+- **Python Integration**: JSON-RPC protocol for seamless Python script execution
+- **Structured Logging**: tracing-based JSON logs for production monitoring
 
 ---
 
 ## 🏛️ Architecture
 
-SilentClaw is composed of modular crates designed for separation of concerns:
-
 ```mermaid
 graph TD
-    CLI[Warden CLI] -->|Config & Commands| Runtime[Operon Runtime]
-    Runtime -->|Orchestrates| Tools
-    Tools -->|Spawns| PyAdapter[Python Adapter]
-    Tools -->|Executes| Shell[Shell Tool]
-    PyAdapter <-->|JSON stdio| PyScript[Python Script]
-    Runtime -->|Persists| Storage[Redb Storage]
+    CLI[Warden CLI] -->|init, run-plan, chat, serve, plugin| RT[Operon Runtime]
+    GW[Operon Gateway] -->|HTTP/WS| RT
+    RT -->|LLM Calls| LLM[LLM Providers]
+    LLM --> Claude["Anthropic<br/>Claude"]
+    LLM --> GPT["OpenAI<br/>GPT"]
+    LLM --> Gemini["Google<br/>Gemini"]
+    RT -->|Execute| Tools["Tool System"]
+    Tools --> Shell["Shell Tool<br/>(blocklist/allowlist)"]
+    Tools --> FS["Filesystem<br/>(read/write/edit/patch)"]
+    Tools --> Python["Python Adapter<br/>(JSON-RPC)"]
+    Tools --> Plugins["Plugin Tools<br/>(FFI dynamic)"]
+    RT -->|Search| Memory["Memory/Search<br/>(hybrid vector+FTS5)"]
+    RT -->|Policy| Policy["7-Layer Policy<br/>Pipeline"]
+    RT -->|Persist| Storage["redb<br/>Key-Value Store"]
 ```
 
-*   **`warden`**: The command-line interface entry point. Handles configuration parsing (`config.toml`), argument handling (CLAP), and initializes the runtime.
-*   **`operon-runtime`**: The core execution engine. Defines the async `Tool` trait, manages the execution loop, handles timeouts, and ensures thread safety. Uses `redb` for persistent storage (e.g., memory/history - *future feature*).
-*   **`operon-adapters`**: Provides implementations for external tools.
-    *   **Python Adapter**: Runs Python scripts as persistent subprocesses, communicating via a strict JSON line-based protocol.
-    *   **Shell Tool**: Safely executes system shell commands with allow/block list support.
+---
+
+## 📦 Crate Structure
+
+| Crate | Description |
+|-------|------------|
+| **warden** | CLI entry point (init, run-plan, chat, serve, plugin) |
+| **operon-runtime** | Core engine: LLM providers, agent loop, memory, hooks, plugins, policy pipeline |
+| **operon-adapters** | Tool implementations: shell, filesystem, python |
+| **operon-gateway** | HTTP/WebSocket server with auth + rate limiting |
+| **operon-plugin-sdk** | Plugin development SDK with `declare_plugin!` macro |
+
+---
 
 ## 🚀 Quick Start
 
 ### Prerequisites
-*   **Rust**: 1.70+ (Stable)
-*   **Python**: 3.8+ (for Python tools)
+- **Rust**: 1.70+ (Stable)
+- **Python**: 3.8+ (for Python tools)
 
 ### Installation
-
-Clone the repository and build the release binary:
 
 ```bash
 git clone https://github.com/tranhoangtu-it/silentclaw.git
@@ -46,106 +75,152 @@ cd silentclaw
 cargo build --release
 ```
 
-The binary will be available at `./target/release/warden`.
+The binary is available at `./target/release/warden`.
 
 ### Basic Usage
 
-Run a plan file (usually JSON) containing the task definition:
-
 ```bash
-# Default (defaults to "Auto" mode, usually Dry Run based on config)
-./target/release/warden run-plan --file examples/plan_hello.json
+# Interactive agent chat
+./target/release/warden chat
 
-# Force Dry Run (No side effects, useful for testing)
-./target/release/warden run-plan --file examples/plan_hello.json --execution-mode dry-run
+# Start gateway server
+./target/release/warden serve --port 3000
 
-# Force Execution (REAL execution of tools)
-./target/release/warden run-plan --file examples/plan_hello.json --execution-mode execute
+# Run a plan
+./target/release/warden run-plan --file plan.json --execution-mode execute
+
+# List plugins
+./target/release/warden plugin list
 ```
 
-### Logging
+---
 
-Enable structured logs for debugging or monitoring:
+## 🌐 LLM Providers
 
-```bash
-RUST_LOG=info ./target/release/warden run-plan --file examples/plan_hello.json
+SilentClaw supports multiple LLM providers with automatic failover:
+
+| Provider | Models | Features |
+|----------|--------|----------|
+| **Anthropic** | Claude 3 (Opus, Sonnet, Haiku) | Tool use, vision, streaming, 200K context |
+| **OpenAI** | GPT-4, GPT-4 Turbo, GPT-3.5 | Function calling, vision, streaming, fine-tuning |
+| **Google Gemini** | Gemini 1.5 Pro, 1.5 Flash | Tool use, vision, streaming, long context |
+
+**Configuration** (`config.toml`):
+```toml
+[llm]
+# Provider failover chain
+providers = ["anthropic", "openai", "gemini"]
+
+[llm.anthropic]
+api_key = "${ANTHROPIC_API_KEY}"
+model = "claude-3-5-sonnet-20241022"
+
+[llm.openai]
+api_key = "${OPENAI_API_KEY}"
+model = "gpt-4-turbo"
+base_url = "https://api.openai.com/v1"
+
+[llm.gemini]
+api_key = "${GOOGLE_API_KEY}"
+model = "gemini-1.5-pro"
 ```
+
+---
 
 ## ⚙️ Configuration
 
-SilentClaw uses a TOML configuration file, typically located at `~/.silentclaw/config.toml` or passed via `--config`.
+SilentClaw uses TOML configuration (typically `~/.silentclaw/config.toml`):
 
 ```toml
 [runtime]
-# Safety first: default to dry-run to prevent accidental damage.
-dry_run = true
-# Global timeout for tool execution (in seconds).
-timeout_secs = 60
-# Max concurrent tools allowed (for parallel execution plans).
-max_parallel = 4
+dry_run = true                    # Safety-first default
+timeout_secs = 60                 # Per-tool timeout
+max_parallel = 4                  # Concurrent execution
+
+[gateway]
+host = "127.0.0.1"
+port = 3000
+auth_token = "${GATEWAY_TOKEN}"
+rate_limit_requests = 100
+rate_limit_window_secs = 60
 
 [tools.shell]
 enabled = true
-# Safety: Block dangerous commands.
 blocklist = ["rm -rf", "mkfs", ":(){ :|:& };:"]
-# Optional: Only allow specific commands (if empty, allows all except blocklist).
 allowlist = []
 
 [tools.python]
 enabled = true
-# Directory to scan for auto-discoverable .py tools.
 scripts_dir = "./tools/python_examples"
 
-[tools.timeouts]
-# Specific overrides per tool type.
-shell = 30
-python = 120
+[tools.filesystem]
+workspace_root = "/workspace"
+max_file_size = 10485760          # 10MB
+
+[memory]
+vector_dimension = 1536
+chunk_size = 512
+search_limit = 10
 ```
 
-## 🔌 Developing Tools
+---
 
-### Python Tools
-SilentClaw supports Python tools via the `PyAdapter`. Your Python script must read JSON requests from `stdin` and write JSON responses to `stdout`.
+## 🔌 Python Tools
 
-**Protocol:**
-1.  **Request (from SilentClaw):** `{"id": 1, "method": "function_name", "params": {...}}`
-2.  **Response (from Script):** `{"id": 1, "result": ...} ` OR `{"id": 1, "error": "Error message"}`
+Create Python tools that communicate via JSON-RPC protocol:
 
-**Example Script (`my_tool.py`):**
 ```python
 import sys
 import json
 
 def handle_request(line):
     req = json.loads(line)
-    # Process logic...
-    response = {"id": req["id"], "result": "Success"}
+    try:
+        result = process_request(req["method"], req.get("params", {}))
+        response = {"id": req["id"], "result": result}
+    except Exception as e:
+        response = {"id": req["id"], "error": str(e)}
+
     print(json.dumps(response))
     sys.stdout.flush()
+
+def process_request(method, params):
+    if method == "greet":
+        return f"Hello, {params.get('name', 'World')}!"
+    raise ValueError(f"Unknown method: {method}")
 
 if __name__ == "__main__":
     for line in sys.stdin:
         handle_request(line)
 ```
 
+---
+
 ## 🛠️ Development & Contributing
 
 ### Build & Test
+
 ```bash
 # Format code
 cargo fmt
 
-# Lint code
+# Lint (0 warnings enforced)
 cargo clippy --all -- -D warnings
 
-# Run unit and integration tests
+# Run all tests (142 pass)
 cargo test --all
+
+# Run with logs
+RUST_LOG=info cargo test --all -- --nocapture
 ```
 
 ### Build Documentation
+
 ```bash
 cargo doc --open
 ```
+
+---
 
 ## ⚖️ License
 
