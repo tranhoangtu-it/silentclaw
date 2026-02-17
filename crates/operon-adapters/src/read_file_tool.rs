@@ -31,13 +31,26 @@ impl Tool for ReadFileTool {
             bail!("File not found: {}", path_str);
         }
 
-        self.guard.check_size(&path)?;
+        self.guard.check_size(&path).await?;
 
-        if !WorkspaceGuard::is_text_file(&path)? {
+        // Read once, check binary inline (avoids double read)
+        let bytes = tokio::fs::read(&path)
+            .await
+            .context("Failed to read file")?;
+        if bytes.is_empty() {
+            return Ok(json!({
+                "content": "",
+                "total_lines": 0,
+                "lines_shown": 0,
+                "offset": 0,
+            }));
+        }
+        let check_len = bytes.len().min(8192);
+        if bytes[..check_len].contains(&0) {
             bail!("Binary file detected, cannot read: {}", path_str);
         }
+        let content = String::from_utf8(bytes).context("File is not valid UTF-8")?;
 
-        let content = std::fs::read_to_string(&path).context("Failed to read file")?;
         let lines: Vec<&str> = content.lines().collect();
         let total_lines = lines.len();
 

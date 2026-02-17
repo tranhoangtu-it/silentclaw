@@ -39,16 +39,16 @@ fn test_workspace_resolve_new_file() {
     assert!(resolved.starts_with(&canonical_root));
 }
 
-#[test]
-fn test_binary_file_detection() {
+#[tokio::test]
+async fn test_binary_file_detection() {
     let dir = tempfile::tempdir().unwrap();
     let text_path = dir.path().join("text.txt");
     std::fs::write(&text_path, "hello world").unwrap();
-    assert!(WorkspaceGuard::is_text_file(&text_path).unwrap());
+    assert!(WorkspaceGuard::is_text_file(&text_path).await.unwrap());
 
     let bin_path = dir.path().join("binary.bin");
     std::fs::write(&bin_path, b"hello\x00world").unwrap();
-    assert!(!WorkspaceGuard::is_text_file(&bin_path).unwrap());
+    assert!(!WorkspaceGuard::is_text_file(&bin_path).await.unwrap());
 }
 
 // ── ReadFileTool ────────────────────────────────────────────────────────

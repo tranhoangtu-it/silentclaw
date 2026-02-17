@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use std::path::{Component, Path, PathBuf};
+use tokio::io::AsyncReadExt;
 
 /// Workspace-scoped path resolver — prevents path traversal attacks.
 /// All file operations must resolve paths through this guard.
@@ -42,16 +43,26 @@ impl WorkspaceGuard {
         Ok(resolved)
     }
 
-    /// Check if file is a text file (no null bytes in first 8KB)
-    pub fn is_text_file(path: &Path) -> Result<bool> {
-        let bytes = std::fs::read(path).context("Failed to read file for binary check")?;
-        let check_len = bytes.len().min(8192);
-        Ok(!bytes[..check_len].contains(&0))
+    /// Check if file is a text file (no null bytes in first 8KB).
+    /// Only reads up to 8KB instead of the entire file.
+    pub async fn is_text_file(path: &Path) -> Result<bool> {
+        let mut file =
+            tokio::fs::File::open(path)
+                .await
+                .context("Failed to open file for binary check")?;
+        let mut buf = vec![0u8; 8192];
+        let n = file
+            .read(&mut buf)
+            .await
+            .context("Failed to read file for binary check")?;
+        Ok(!buf[..n].contains(&0))
     }
 
     /// Check file size against limit
-    pub fn check_size(&self, path: &Path) -> Result<()> {
-        let meta = std::fs::metadata(path).context("Failed to read file metadata")?;
+    pub async fn check_size(&self, path: &Path) -> Result<()> {
+        let meta = tokio::fs::metadata(path)
+            .await
+            .context("Failed to read file metadata")?;
         if meta.len() > self.max_file_size {
             bail!(
                 "File too large: {} bytes (max {} MB)",

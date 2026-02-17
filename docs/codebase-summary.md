@@ -24,9 +24,11 @@
 | **Health Endpoint** | Excluded from rate limiting (LB health checks not throttled) |
 | **Review Findings** | All 5 code review items fixed (H2, H3, M1, M2, M4) |
 
-## Code Review Hardening (Post-Phase 2)
+## Code Review Hardening (Post-Phase 2 & Phase 3)
 
-**Session 2026-02-17: All 5 Review Findings Fixed**
+**Session 2026-02-17: All 5+3 Review Findings Fixed**
+
+### Phase 2 Fixes (5 items)
 
 Critical bug fixes addressing architectural race conditions and data integrity issues:
 
@@ -55,16 +57,45 @@ Critical bug fixes addressing architectural race conditions and data integrity i
    - **Fix:** Updated log messages to honestly state "note: runtime provider swap not yet implemented".
    - **Impact:** Accurate operator expectations, scaffolding preserved for future hot-swap feature.
 
-**Files Modified:**
-- `crates/operon-gateway/src/session_manager.rs` - Orphan detection logic
-- `crates/operon-gateway/src/rate_limiter.rs` - `/health` exemption
-- `crates/operon-runtime/src/llm/streaming.rs` - UTF-8 safe buffer, `drive_sse_stream()`
-- `crates/operon-runtime/src/llm/anthropic.rs` - Delegated to `drive_sse_stream()`
-- `crates/operon-runtime/src/llm/openai.rs` - Delegated to `drive_sse_stream()`
-- `crates/warden/src/commands/chat.rs` - Fixed reload log message
-- `crates/warden/src/commands/serve.rs` - Fixed reload log message
+### Phase 3 Fixes (3 items)
 
-**Test Results:** All 90+ tests passing, 0 clippy warnings
+Performance and modularity improvements for filesystem tools:
+
+1. **H1: Filesystem Tools Now Async I/O** (HIGH)
+   - **Issue:** Filesystem tools used blocking `std::fs` calls, blocking async runtime threads.
+   - **Fix:** Migrated `workspace_guard.rs` to use `tokio::fs` async I/O. Methods `is_text_file()` and `check_size()` are now async.
+   - **Impact:** Async runtime no longer starved by file I/O operations.
+
+2. **H2: New Module `diff_parser.rs`** (HIGH - Code Organization)
+   - **Issue:** `apply_patch_tool.rs` contained mixed concerns: diff parsing + patch application.
+   - **Fix:** Extracted unified diff parsing into dedicated `diff_parser.rs` module with types: `HunkLine`, `Hunk`, `FilePatch`, and `parse_unified_diff()`.
+   - **Impact:** Single responsibility principle, reusable parsing logic.
+
+3. **H3: Tool Registration Deduplication** (HIGH - DRY)
+   - **Issue:** `chat.rs` and `serve.rs` both had duplicated tool registration blocks (~20 lines each).
+   - **Fix:** Added helper functions in `operon-adapters/src/lib.rs`: `register_shell_tool()` and `register_filesystem_tools()`.
+   - **Impact:** Single source of truth for tool registration, consistent setup across commands.
+
+4. **M1+M2 Bonus: `is_text_file()` Optimization** (MEDIUM)
+   - **Issue:** Binary detection read entire file, wasting I/O on large files.
+   - **Fix:** Only read first 8KB for null byte check via `tokio::fs`.
+   - **Impact:** O(8KB) read instead of O(file_size), performance boost on large files.
+
+5. **M2 Bonus: `ReadFileTool` Inline Binary Check** (MEDIUM)
+   - **Issue:** `ReadFileTool` called `is_text_file()` then read file again (double I/O).
+   - **Fix:** Read file once, check binary inline during UTF-8 conversion (checks first 8KB).
+   - **Impact:** Single file read instead of two, reduced I/O overhead.
+
+**Files Modified (Phase 3):**
+- `crates/operon-adapters/src/workspace_guard.rs` - Async I/O via `tokio::fs`, 8KB buffer for binary check
+- `crates/operon-adapters/src/diff_parser.rs` - NEW: Extracted unified diff parsing logic
+- `crates/operon-adapters/src/apply_patch_tool.rs` - Now uses `diff_parser` module
+- `crates/operon-adapters/src/read_file_tool.rs` - Inline binary check, single read
+- `crates/operon-adapters/src/lib.rs` - NEW: `register_shell_tool()` and `register_filesystem_tools()` helpers
+- `crates/warden/src/commands/chat.rs` - Uses helpers (duplicated blocks removed)
+- `crates/warden/src/commands/serve.rs` - Uses helpers (duplicated blocks removed)
+
+**Test Results:** All 110 tests passing, 0 clippy warnings
 
 ## Phase 2 Implementation Summary
 
@@ -232,15 +263,21 @@ pub struct ConfigManager<C: DeserializeOwned + Send + Sync> { /* ... */ }
   - Returns exit code
   - Dry-run mode (logs only, no execution)
 
-- **Filesystem Tools** (NEW - Phase 3)
-  - **workspace_guard.rs** (~60 LOC) - Path resolution with traversal protection
+- **Filesystem Tools** (NEW - Phase 3, Code Review Hardened)
+  - **workspace_guard.rs** (~80 LOC) - Path resolution with traversal protection (H1: Now async I/O via tokio::fs)
     - Canonicalize paths relative to workspace root
     - Reject paths outside workspace boundary
-    - Binary file detection (null byte check)
-  - **read_file_tool.rs** (~100 LOC) - Read files with offset/limit
+    - Binary file detection: reads only first 8KB for null byte check (M1 optimization)
+    - Methods `is_text_file()` and `check_size()` are async
+  - **diff_parser.rs** (NEW - H2: Extracted module, ~80 LOC) - Unified diff parsing
+    - Types: `HunkLine`, `Hunk`, `FilePatch`
+    - Function: `parse_unified_diff(patch: &str) -> Result<Vec<FilePatch>>`
+    - Single source of truth for diff parsing
+  - **read_file_tool.rs** (~100 LOC) - Read files with offset/limit (M2: Inline binary check)
     - Optional line offset and limit parameters
     - Line-numbered output (cat -n style)
     - 10MB max file size (configurable)
+    - Single read operation, checks binary inline (no double I/O)
   - **write_file_tool.rs** (~90 LOC) - Atomic file writes
     - Create parent directories automatically
     - Temp file + atomic rename (crash-safe)
@@ -249,8 +286,8 @@ pub struct ConfigManager<C: DeserializeOwned + Send + Sync> { /* ... */ }
     - Old string to new string substitution
     - Ambiguity detection (multiple matches error)
     - Optional replace_all flag for multiple replacements
-  - **apply_patch_tool.rs** (~150 LOC) - Unified diff patch application
-    - Parse unified diff format (diff -u)
+  - **apply_patch_tool.rs** (~130 LOC) - Unified diff patch application (H2: Uses diff_parser module)
+    - Calls `diff_parser::parse_unified_diff()`
     - Multi-hunk support with context matching
     - Atomic write with error rollback
 
@@ -336,12 +373,13 @@ crates/
 │   └── src/
 │       ├── python_adapter.rs
 │       ├── shell_tool.rs
-│       ├── workspace_guard.rs        (NEW - Phase 3)
-│       ├── read_file_tool.rs         (NEW - Phase 3)
+│       ├── workspace_guard.rs        (NEW - Phase 3, UPDATED Phase 3 CR: async I/O)
+│       ├── diff_parser.rs            (NEW - Phase 3 CR: extracted module)
+│       ├── read_file_tool.rs         (NEW - Phase 3, UPDATED Phase 3 CR: inline check)
 │       ├── write_file_tool.rs        (NEW - Phase 3)
 │       ├── edit_file_tool.rs         (NEW - Phase 3)
-│       ├── apply_patch_tool.rs       (NEW - Phase 3)
-│       ├── lib.rs
+│       ├── apply_patch_tool.rs       (NEW - Phase 3, UPDATED Phase 3 CR: uses diff_parser)
+│       ├── lib.rs                    (UPDATED Phase 3 CR: registration helpers)
 │       └── tests/
 │           └── filesystem_tools_test.rs  (NEW - Phase 3: 20 tests)
 ├── operon-gateway/

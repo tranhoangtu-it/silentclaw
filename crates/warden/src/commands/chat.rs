@@ -1,9 +1,7 @@
 use crate::cli::ExecutionMode;
 use crate::config::Config;
 use anyhow::{anyhow, Result};
-use operon_adapters::{
-    ApplyPatchTool, EditFileTool, ReadFileTool, ShellTool, WorkspaceGuard, WriteFileTool,
-};
+use operon_adapters::{register_filesystem_tools, register_shell_tool};
 use operon_runtime::{
     Agent, AgentConfig, AnthropicClient, ConfigManager, ConfigReloadEvent, LLMProvider,
     OpenAIClient, ProviderChain, Runtime, SessionStore,
@@ -39,32 +37,20 @@ pub async fn execute(
     let runtime = Arc::new(Runtime::new(dry_run, default_timeout)?);
 
     if config.tools.shell.enabled {
-        let shell_tool = ShellTool::new(dry_run).with_validation(
+        register_shell_tool(
+            &runtime,
+            dry_run,
             config.tools.shell.blocklist.clone(),
             config.tools.shell.allowlist.clone(),
-        );
-        runtime.register_tool("shell".to_string(), Arc::new(shell_tool))?;
+        )?;
     }
 
     if config.tools.filesystem.enabled {
-        let ws_root = PathBuf::from(&config.tools.filesystem.workspace);
-        let guard = Arc::new(WorkspaceGuard::new(
-            ws_root,
+        register_filesystem_tools(
+            &runtime,
+            PathBuf::from(&config.tools.filesystem.workspace),
             config.tools.filesystem.max_file_size_mb,
-        )?);
-        runtime.register_tool(
-            "read_file".into(),
-            Arc::new(ReadFileTool::new(guard.clone())),
         )?;
-        runtime.register_tool(
-            "write_file".into(),
-            Arc::new(WriteFileTool::new(guard.clone())),
-        )?;
-        runtime.register_tool(
-            "edit_file".into(),
-            Arc::new(EditFileTool::new(guard.clone())),
-        )?;
-        runtime.register_tool("apply_patch".into(), Arc::new(ApplyPatchTool::new(guard)))?;
     }
 
     // Build agent config

@@ -31,7 +31,8 @@ impl Tool for WriteFileTool {
 
         // Create parent directories
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
+            tokio::fs::create_dir_all(parent)
+                .await
                 .context(format!("Failed to create directories: {:?}", parent))?;
         }
 

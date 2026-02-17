@@ -488,19 +488,21 @@ pub async fn start_server(
 
 **Purpose:** Bridge Rust runtime with external tools and filesystem operations
 
-#### Filesystem Tools (NEW - Phase 3)
+#### Filesystem Tools (NEW - Phase 3, Code Review Hardened)
 
-**Purpose:** Workspace-scoped file operations with path traversal protection and atomic writes
+**Purpose:** Workspace-scoped file operations with path traversal protection and async I/O
 
-**WorkspaceGuard (Central Security):**
+**WorkspaceGuard (Central Security, H1: Now Async)**
 ```rust
 pub struct WorkspaceGuard {
     root: PathBuf,
+    max_file_size: u64,
 }
 
 impl WorkspaceGuard {
-    pub fn resolve_path(&self, path: &str) -> Result<PathBuf>
-    pub fn is_text_file(path: &Path) -> Result<bool>
+    pub fn resolve(&self, input_path: &str) -> Result<PathBuf>
+    pub async fn is_text_file(path: &Path) -> Result<bool>
+    pub async fn check_size(&self, path: &Path) -> Result<()>
 }
 ```
 
@@ -508,13 +510,38 @@ Ensures all file operations stay within workspace boundary:
 - Canonicalizes paths (resolves symlinks)
 - Validates `canonical.starts_with(&self.root)`
 - Rejects traversal attempts (e.g., `../../etc/passwd`)
-- Binary detection: checks for null bytes in first 8KB
+- Binary detection: async read of first 8KB only (M1 optimization: was reading entire file)
+- Methods now async via `tokio::fs` (H1: was blocking `std::fs`)
 
-**read_file Tool:**
+**Diff Parser Module (H2: Extracted, NEW)**
+```rust
+pub enum HunkLine {
+    Context(String),
+    Remove(String),
+    Add(String),
+}
+
+pub struct Hunk {
+    pub old_start: usize,
+    pub lines: Vec<HunkLine>,
+}
+
+pub struct FilePatch {
+    pub path: String,
+    pub hunks: Vec<Hunk>,
+}
+
+pub fn parse_unified_diff(patch: &str) -> Result<Vec<FilePatch>>
+```
+
+Extracted unified diff parsing into dedicated module for reusability and single source of truth.
+
+**read_file Tool (M2: Inline binary check):**
 - Input: `{ "path": string, "offset": u64?, "limit": u64? }`
 - Returns: Content with line numbers (cat -n format)
 - 10MB max file size (configurable)
 - Read-only permission level
+- Single async read, checks binary status inline (was calling `is_text_file()` separately, causing double I/O)
 
 **write_file Tool:**
 - Input: `{ "path": string, "content": string }`
@@ -522,6 +549,7 @@ Ensures all file operations stay within workspace boundary:
 - Creates parent directories automatically
 - Returns: `{ "bytes_written": N, "path": "resolved_path" }`
 - Write permission level
+- Uses async `tokio::fs` for atomic operations
 
 **edit_file Tool:**
 - Input: `{ "path": string, "old_string": string, "new_string": string, "replace_all": bool? }`
@@ -530,9 +558,9 @@ Ensures all file operations stay within workspace boundary:
 - Returns: `{ "replacements": N, "path": "resolved_path" }`
 - Write permission level
 
-**apply_patch Tool:**
+**apply_patch Tool (H2: Uses diff_parser module):**
 - Input: `{ "patch": string }` (unified diff format)
-- Parses diff headers: `--- a/path` and `+++ b/path`
+- Calls `diff_parser::parse_unified_diff()` for unified diff parsing
 - Applies hunks with context matching
 - Atomic: writes to temp file, then renames
 - Returns: `{ "files_modified": N, "hunks_applied": N }`
@@ -540,10 +568,29 @@ Ensures all file operations stay within workspace boundary:
 
 **Features:**
 - All 4 tools constructed with `WorkspaceGuard` for path validation
+- Async I/O prevents starving tokio runtime threads (H1)
 - Atomic writes prevent partial file corruption on crash
-- Binary file detection prevents corrupting non-text files
+- Binary file detection prevents corrupting non-text files (only reads 8KB, M1)
 - File size limits prevent memory exhaustion
 - Comprehensive error messages for path traversal, ambiguous matches, etc.
+
+**Tool Registration (H3: Deduplication)**
+New helper functions in `operon-adapters/src/lib.rs`:
+```rust
+pub fn register_shell_tool(
+    runtime: &Arc<Runtime>,
+    dry_run: bool,
+    blocklist: Vec<String>,
+    allowlist: Vec<String>,
+) -> Result<()>
+
+pub fn register_filesystem_tools(
+    runtime: &Arc<Runtime>,
+    workspace: PathBuf,
+    max_file_size_mb: u64,
+) -> Result<()>
+```
+Eliminates duplication in `chat.rs` and `serve.rs` (was ~20 lines each).
 
 #### Python Adapter (PyAdapter)
 
@@ -773,17 +820,31 @@ Client disconnect:
 
 ## Component Interactions
 
-### Tool Registration
+### Tool Registration (Phase 3 CR: Using Helpers)
 
 ```rust
+use operon_adapters::{register_shell_tool, register_filesystem_tools};
+
 let runtime = Runtime::new(dry_run);
 
-// Register adapters
-let shell_tool = ShellTool::new(dry_run);
-runtime.register_tool("shell", Arc::new(shell_tool));
+// Register shell tool (H3: uses helper to avoid duplication)
+register_shell_tool(
+    &runtime,
+    dry_run,
+    vec!["rm -rf".to_string(), "mkfs".to_string()],
+    vec![]
+)?;
 
+// Register filesystem tools (H3: uses helper to avoid duplication)
+register_filesystem_tools(
+    &runtime,
+    PathBuf::from("/workspace"),
+    10  // max_file_size_mb
+)?;
+
+// Manual registration for custom tools
 let py_adapter = PyAdapter::spawn("./tools/my_tool.py").await?;
-runtime.register_tool("python", Arc::new(py_adapter));
+runtime.register_tool("python", Arc::new(py_adapter))?;
 ```
 
 ### Streaming Response Parsing

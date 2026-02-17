@@ -37,9 +37,11 @@ impl Tool for EditFileTool {
             bail!("File not found: {}", path_str);
         }
 
-        self.guard.check_size(&path)?;
+        self.guard.check_size(&path).await?;
 
-        let content = std::fs::read_to_string(&path).context("Failed to read file")?;
+        let content = tokio::fs::read_to_string(&path)
+            .await
+            .context("Failed to read file")?;
         let match_count = content.matches(old_string).count();
 
         if match_count == 0 {
