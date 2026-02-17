@@ -1,7 +1,9 @@
 use crate::cli::ExecutionMode;
 use crate::config::Config;
 use anyhow::{anyhow, Result};
-use operon_adapters::ShellTool;
+use operon_adapters::{
+    ApplyPatchTool, EditFileTool, ReadFileTool, ShellTool, WorkspaceGuard, WriteFileTool,
+};
 use operon_runtime::{
     Agent, AgentConfig, AnthropicClient, ConfigManager, ConfigReloadEvent, LLMProvider,
     OpenAIClient, ProviderChain, Runtime, SessionStore,
@@ -42,6 +44,27 @@ pub async fn execute(
             config.tools.shell.allowlist.clone(),
         );
         runtime.register_tool("shell".to_string(), Arc::new(shell_tool))?;
+    }
+
+    if config.tools.filesystem.enabled {
+        let ws_root = PathBuf::from(&config.tools.filesystem.workspace);
+        let guard = Arc::new(WorkspaceGuard::new(
+            ws_root,
+            config.tools.filesystem.max_file_size_mb,
+        )?);
+        runtime.register_tool(
+            "read_file".into(),
+            Arc::new(ReadFileTool::new(guard.clone())),
+        )?;
+        runtime.register_tool(
+            "write_file".into(),
+            Arc::new(WriteFileTool::new(guard.clone())),
+        )?;
+        runtime.register_tool(
+            "edit_file".into(),
+            Arc::new(EditFileTool::new(guard.clone())),
+        )?;
+        runtime.register_tool("apply_patch".into(), Arc::new(ApplyPatchTool::new(guard)))?;
     }
 
     // Build agent config

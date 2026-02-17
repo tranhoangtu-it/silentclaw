@@ -71,7 +71,42 @@ pub struct ToolsConfig {
     pub python: PythonConfig,
 
     #[serde(default)]
+    pub filesystem: FilesystemConfig,
+
+    #[serde(default)]
     pub timeouts: HashMap<String, u64>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct FilesystemConfig {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+
+    /// Workspace root (relative to CWD or absolute)
+    #[serde(default = "default_workspace")]
+    pub workspace: String,
+
+    /// Max file size in MB for read operations
+    #[serde(default = "default_max_file_size_mb")]
+    pub max_file_size_mb: u64,
+}
+
+fn default_workspace() -> String {
+    ".".to_string()
+}
+
+fn default_max_file_size_mb() -> u64 {
+    10
+}
+
+impl Default for FilesystemConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_enabled(),
+            workspace: default_workspace(),
+            max_file_size_mb: default_max_file_size_mb(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -149,6 +184,7 @@ impl Config {
             tools: ToolsConfig {
                 shell: ShellConfig::default(),
                 python: PythonConfig::default(),
+                filesystem: FilesystemConfig::default(),
                 timeouts: HashMap::new(),
             },
             llm: LlmConfig::default(),

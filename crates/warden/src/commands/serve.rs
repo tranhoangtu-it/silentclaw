@@ -2,7 +2,9 @@ use crate::cli::ExecutionMode;
 use crate::commands::chat::build_provider;
 use crate::config::Config;
 use anyhow::Result;
-use operon_adapters::ShellTool;
+use operon_adapters::{
+    ApplyPatchTool, EditFileTool, ReadFileTool, ShellTool, WorkspaceGuard, WriteFileTool,
+};
 use operon_gateway::{start_server, AppState, AuthConfig, RateLimiter, SessionManager};
 use operon_runtime::{ConfigManager, ConfigReloadEvent, Runtime};
 use std::path::PathBuf;
@@ -37,6 +39,27 @@ pub async fn execute(
             config.tools.shell.allowlist.clone(),
         );
         runtime.register_tool("shell".to_string(), Arc::new(shell_tool))?;
+    }
+
+    if config.tools.filesystem.enabled {
+        let ws_root = std::path::PathBuf::from(&config.tools.filesystem.workspace);
+        let guard = Arc::new(WorkspaceGuard::new(
+            ws_root,
+            config.tools.filesystem.max_file_size_mb,
+        )?);
+        runtime.register_tool(
+            "read_file".into(),
+            Arc::new(ReadFileTool::new(guard.clone())),
+        )?;
+        runtime.register_tool(
+            "write_file".into(),
+            Arc::new(WriteFileTool::new(guard.clone())),
+        )?;
+        runtime.register_tool(
+            "edit_file".into(),
+            Arc::new(EditFileTool::new(guard.clone())),
+        )?;
+        runtime.register_tool("apply_patch".into(), Arc::new(ApplyPatchTool::new(guard)))?;
     }
 
     // Start config hot-reload watcher if config path is provided
