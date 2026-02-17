@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -9,15 +10,18 @@ use tracing::{info, warn};
 use crate::hooks::HookRegistry;
 use crate::Runtime;
 
+use super::ffi_bridge::PluginHandle;
 use super::manifest::{discover_plugins, PluginManifest, PluginType};
 
 /// Current API version plugins must match
 pub const CURRENT_API_VERSION: u32 = 1;
 
-/// Loaded plugin info (metadata only - tools/hooks already registered)
+/// Loaded plugin: manifest metadata + optional FFI handle for native plugins
 pub struct LoadedPlugin {
     pub manifest: PluginManifest,
     pub plugin_dir: std::path::PathBuf,
+    /// FFI handle — present when the .so/.dylib was successfully loaded
+    pub handle: Option<PluginHandle>,
 }
 
 /// Plugin loader: discovers, validates, loads, and registers plugins
@@ -56,7 +60,10 @@ impl PluginLoader {
         Ok(loaded)
     }
 
-    /// Load a single plugin from manifest
+    /// Load a single plugin from manifest.
+    ///
+    /// For native plugins: loads .so/.dylib via FFI, calls init(), registers tools+hooks.
+    /// If the entry point is not a valid shared library, falls back to metadata-only mode.
     pub async fn load_plugin(&self, manifest: &PluginManifest, plugin_dir: &Path) -> Result<()> {
         // Validate API version
         if manifest.api_version != CURRENT_API_VERSION {
@@ -73,7 +80,9 @@ impl PluginLoader {
             return Err(anyhow!("Plugin '{}' already loaded", manifest.name));
         }
 
-        // Validate plugin type
+        let mut ffi_handle: Option<PluginHandle> = None;
+
+        // Validate and load plugin
         match manifest.plugin_type {
             PluginType::Native => {
                 let entry_path = manifest.resolve_entry_point(plugin_dir);
@@ -83,35 +92,88 @@ impl PluginLoader {
                         entry_path
                     ));
                 }
-                // Native loading via libloading deferred until actual .so/.dylib is built
-                // For now, we validate manifest and register metadata
-                info!(
-                    plugin = %manifest.name,
-                    entry = ?entry_path,
-                    "Native plugin validated (FFI loading requires compiled library)"
-                );
+
+                // Attempt FFI loading
+                match PluginHandle::load(&entry_path) {
+                    Ok(mut handle) => {
+                        // Init with panic isolation
+                        let init_result = catch_unwind(AssertUnwindSafe(|| {
+                            handle.plugin_mut().init(serde_json::Value::Null)
+                        }));
+
+                        match init_result {
+                            Ok(Ok(())) => {
+                                // Register tools
+                                for tool in handle.plugin().tools() {
+                                    let name = tool.name().to_string();
+                                    if let Err(e) =
+                                        self.runtime.register_tool(name.clone(), Arc::from(tool))
+                                    {
+                                        warn!(tool = %name, error = %e, "Failed to register plugin tool");
+                                    }
+                                }
+
+                                // Register hooks
+                                for hook in handle.plugin().hooks() {
+                                    self.hook_registry.register(Arc::from(hook));
+                                }
+
+                                info!(
+                                    plugin = %manifest.name,
+                                    entry = ?entry_path,
+                                    "Native plugin loaded via FFI"
+                                );
+                                ffi_handle = Some(handle);
+                            }
+                            Ok(Err(e)) => {
+                                warn!(plugin = %manifest.name, error = %e, "Plugin init failed");
+                                return Err(anyhow!("Plugin '{}' init failed: {}", manifest.name, e));
+                            }
+                            Err(_) => {
+                                warn!(plugin = %manifest.name, "Plugin panicked during init");
+                                return Err(anyhow!("Plugin '{}' panicked during init", manifest.name));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // Not a valid .so/.dylib — register metadata only
+                        info!(
+                            plugin = %manifest.name,
+                            entry = ?entry_path,
+                            error = %e,
+                            "Native plugin validated (FFI loading unavailable)"
+                        );
+                    }
+                }
             }
         }
 
-        // Store plugin metadata
+        // Store plugin
         self.plugins.write().await.insert(
             manifest.name.clone(),
             LoadedPlugin {
                 manifest: manifest.clone(),
                 plugin_dir: plugin_dir.to_path_buf(),
+                handle: ffi_handle,
             },
         );
 
         Ok(())
     }
 
-    /// Unload a plugin by name
+    /// Unload a plugin by name. Calls shutdown on FFI-loaded plugins.
     pub async fn unload_plugin(&self, name: &str) -> Result<()> {
-        self.plugins
+        let loaded = self
+            .plugins
             .write()
             .await
             .remove(name)
             .ok_or_else(|| anyhow!("Plugin '{}' not found", name))?;
+
+        // Shutdown FFI handle if present
+        if let Some(handle) = loaded.handle {
+            handle.shutdown_and_drop();
+        }
 
         info!(plugin = name, "Plugin unloaded");
         Ok(())

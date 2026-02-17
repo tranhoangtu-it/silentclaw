@@ -9,34 +9,11 @@ pub use serde_json::Value;
 
 // Re-export core traits from runtime
 pub use operon_runtime::hooks::{Hook, HookContext, HookEvent, HookResult};
+pub use operon_runtime::plugin::Plugin;
 pub use operon_runtime::tool::Tool;
 
 /// Current plugin API version. Plugins must match this to load.
 pub const API_VERSION: u32 = 1;
-
-/// Plugin trait - the main interface for SilentClaw plugins
-pub trait Plugin: Send + Sync {
-    /// Plugin name (must be unique)
-    fn name(&self) -> &str;
-
-    /// Plugin version (semver)
-    fn version(&self) -> &str;
-
-    /// API version this plugin was built against
-    fn api_version(&self) -> u32;
-
-    /// Initialize plugin with config
-    fn init(&mut self, config: Value) -> Result<()>;
-
-    /// Shutdown and cleanup resources
-    fn shutdown(&mut self) -> Result<()>;
-
-    /// Tools provided by this plugin
-    fn tools(&self) -> Vec<Box<dyn Tool>>;
-
-    /// Hooks provided by this plugin
-    fn hooks(&self) -> Vec<Box<dyn Hook>>;
-}
 
 /// Macro for plugin entry point. Use in plugin crate:
 /// ```ignore
@@ -47,12 +24,31 @@ pub trait Plugin: Send + Sync {
 ///
 /// declare_plugin!(MyPlugin);
 /// ```
+///
+/// ## ABI Contract
+///
+/// Generates two `extern "C"` symbols using double-boxing for FFI-safe thin pointers:
+/// - `_plugin_create() -> *mut c_void` — allocates `Box<Box<dyn Plugin>>`, returns thin pointer
+/// - `_plugin_destroy(ptr: *mut c_void)` — reconstructs and drops the double-boxed plugin
+///
+/// **Constraint:** Plugin and host must be compiled with the same Rust compiler version
+/// (same vtable layout). This is guaranteed within a Cargo workspace build.
 #[macro_export]
 macro_rules! declare_plugin {
     ($plugin_type:ty) => {
         #[no_mangle]
-        pub extern "C" fn _plugin_create() -> *mut dyn $crate::Plugin {
-            Box::into_raw(Box::new(<$plugin_type>::default()))
+        pub extern "C" fn _plugin_create() -> *mut std::ffi::c_void {
+            let plugin: Box<dyn $crate::Plugin> = Box::new(<$plugin_type>::default());
+            Box::into_raw(Box::new(plugin)) as *mut std::ffi::c_void
+        }
+
+        /// # Safety
+        /// `ptr` must be a pointer returned by `_plugin_create` from this plugin.
+        #[no_mangle]
+        pub unsafe extern "C" fn _plugin_destroy(ptr: *mut std::ffi::c_void) {
+            if !ptr.is_null() {
+                drop(Box::from_raw(ptr as *mut Box<dyn $crate::Plugin>));
+            }
         }
     };
 }

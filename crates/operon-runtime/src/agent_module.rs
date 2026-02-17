@@ -473,8 +473,10 @@ mod tests {
             .collect();
 
         let llm = Arc::new(MockLLM::new(responses));
-        let mut config = AgentConfig::default();
-        config.max_iterations = 3;
+        let config = AgentConfig {
+            max_iterations: 3,
+            ..AgentConfig::default()
+        };
 
         let mut agent = Agent::new(config, llm, make_runtime());
         let result = agent.process_message("loop forever").await;
