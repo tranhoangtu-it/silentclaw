@@ -1,8 +1,8 @@
 # SilentClaw Codebase Summary
 
 **Generated:** 2026-02-17
-**Version:** 2.0.0-phase-2
-**Status:** Phase 2 Complete + Code Review Hardening
+**Version:** 2.0.0-phase-3
+**Status:** Phase 3 Complete + Filesystem Tools
 
 ## Quick Reference
 
@@ -12,12 +12,12 @@
 | **Architecture** | Modular workspace (5 crates + SDK) |
 | **Crates** | 5 production crates + 1 SDK crate |
 | **CLI Commands** | 5 (run-plan, chat, serve, plugin, init) |
-| **Test Coverage** | 68 tests (0 failures) |
+| **Test Coverage** | 110 tests (0 failures) |
 | **Clippy Warnings** | 0 |
 | **Code Quality** | Clean, zero technical debt |
 | **Main Binary** | `warden` (action orchestrator + agent + server) |
 | **Core Libraries** | operon-runtime, operon-gateway, operon-plugin-sdk |
-| **Tool Adapters** | `operon-adapters` (Python + Shell) |
+| **Tool Adapters** | `operon-adapters` (Python + Shell + Filesystem) |
 | **Streaming Support** | SSE streaming (Anthropic + OpenAI), 1MB buffer protection, UTF-8 safe |
 | **Config Reload** | File watcher + broadcast channel, live updates without restart |
 | **Session Manager** | Race condition fixed: orphan session detection after re-insert |
@@ -232,6 +232,28 @@ pub struct ConfigManager<C: DeserializeOwned + Send + Sync> { /* ... */ }
   - Returns exit code
   - Dry-run mode (logs only, no execution)
 
+- **Filesystem Tools** (NEW - Phase 3)
+  - **workspace_guard.rs** (~60 LOC) - Path resolution with traversal protection
+    - Canonicalize paths relative to workspace root
+    - Reject paths outside workspace boundary
+    - Binary file detection (null byte check)
+  - **read_file_tool.rs** (~100 LOC) - Read files with offset/limit
+    - Optional line offset and limit parameters
+    - Line-numbered output (cat -n style)
+    - 10MB max file size (configurable)
+  - **write_file_tool.rs** (~90 LOC) - Atomic file writes
+    - Create parent directories automatically
+    - Temp file + atomic rename (crash-safe)
+    - Return bytes written
+  - **edit_file_tool.rs** (~120 LOC) - Exact string replacement
+    - Old string to new string substitution
+    - Ambiguity detection (multiple matches error)
+    - Optional replace_all flag for multiple replacements
+  - **apply_patch_tool.rs** (~150 LOC) - Unified diff patch application
+    - Parse unified diff format (diff -u)
+    - Multi-hunk support with context matching
+    - Atomic write with error rollback
+
 ### 3. operon-gateway (Production Hardened + Review Fixes)
 
 **Purpose:** HTTP/WebSocket API server with security hardening and race condition fixes
@@ -311,6 +333,17 @@ crates/
 │       └── scheduler.rs
 │
 ├── operon-adapters/
+│   └── src/
+│       ├── python_adapter.rs
+│       ├── shell_tool.rs
+│       ├── workspace_guard.rs        (NEW - Phase 3)
+│       ├── read_file_tool.rs         (NEW - Phase 3)
+│       ├── write_file_tool.rs        (NEW - Phase 3)
+│       ├── edit_file_tool.rs         (NEW - Phase 3)
+│       ├── apply_patch_tool.rs       (NEW - Phase 3)
+│       ├── lib.rs
+│       └── tests/
+│           └── filesystem_tools_test.rs  (NEW - Phase 3: 20 tests)
 ├── operon-gateway/
 │   ├── src/
 │   │   ├── server.rs
@@ -514,7 +547,7 @@ No restart required
 
 ## Test Summary
 
-**Total: 90 tests (100% passing, 0 failures)**
+**Total: 110 tests (100% passing, 0 failures)**
 
 | Component | Tests | File | Status |
 |-----------|-------|------|--------|
@@ -529,15 +562,17 @@ No restart required
 | Anthropic Client | 14 | llm/anthropic.rs | ✅ |
 | OpenAI Client | 12 | llm/openai.rs | ✅ |
 | Failover Chain | 5 | llm/failover.rs | ✅ |
-| **Total** | **90** | — | **✅** |
+| Filesystem Tools | 20 | operon-adapters/tests/filesystem_tools_test.rs | ✅ |
+| **Total** | **110** | — | **✅** |
 
 ### Test Execution
 
 ```bash
-cargo test --all           # Run all 68 tests
+cargo test --all           # Run all 110 tests
 RUST_LOG=debug cargo test  # With logging visible
 cargo test streaming       # Run only streaming tests
 cargo test config_manager  # Run only config tests
+cargo test filesystem      # Run only filesystem tools tests
 ```
 
 ## Build & Artifacts
@@ -655,8 +690,8 @@ See `/docs/known-limitations.md` for complete list. Key Phase 1 notes:
 
 ---
 
-**Phase 2 Completed:** 2026-02-17
-**Tests:** 90 passing, 0 failures
+**Phase 3 Completed:** 2026-02-17
+**Tests:** 110 passing (20 new filesystem tools tests), 0 failures
 **Code Quality:** 0 clippy warnings, 0 unsafe blocks
-**Plugin FFI:** Safe double-boxing with panic isolation
+**Filesystem Tools:** WorkspaceGuard + read/write/edit/patch with atomic writes
 **Gateway Coverage:** 20 integration tests across health, auth, sessions, WebSocket

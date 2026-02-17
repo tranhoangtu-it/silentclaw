@@ -1,8 +1,8 @@
 # SilentClaw System Architecture
 
 **Last Updated:** 2026-02-17
-**Version:** 2.0.0-phase-2
-**Status:** Phase 2 Complete - Plugin FFI + Gateway Tests
+**Version:** 2.0.0-phase-3
+**Status:** Phase 3 Complete - Filesystem Tools
 
 ## Overview
 
@@ -24,6 +24,7 @@ v2.0: user → agent → LLM → tool → observe → feedback (loop) → respon
       + plugins, hooks, gateway, persistence
 v2.1: + streaming (SSE) + config hot-reload (Phase 1)
 v2.2: + plugin FFI + gateway integration tests (Phase 2)
+v2.3: + filesystem tools (read/write/edit/patch) with workspace scoping (Phase 3)
 ```
 
 ## Architecture Layers (8 Layers)
@@ -485,7 +486,64 @@ pub async fn start_server(
 
 ### Layer 9: Tool Adapters (operon-adapters)
 
-**Purpose:** Bridge Rust runtime with external tools
+**Purpose:** Bridge Rust runtime with external tools and filesystem operations
+
+#### Filesystem Tools (NEW - Phase 3)
+
+**Purpose:** Workspace-scoped file operations with path traversal protection and atomic writes
+
+**WorkspaceGuard (Central Security):**
+```rust
+pub struct WorkspaceGuard {
+    root: PathBuf,
+}
+
+impl WorkspaceGuard {
+    pub fn resolve_path(&self, path: &str) -> Result<PathBuf>
+    pub fn is_text_file(path: &Path) -> Result<bool>
+}
+```
+
+Ensures all file operations stay within workspace boundary:
+- Canonicalizes paths (resolves symlinks)
+- Validates `canonical.starts_with(&self.root)`
+- Rejects traversal attempts (e.g., `../../etc/passwd`)
+- Binary detection: checks for null bytes in first 8KB
+
+**read_file Tool:**
+- Input: `{ "path": string, "offset": u64?, "limit": u64? }`
+- Returns: Content with line numbers (cat -n format)
+- 10MB max file size (configurable)
+- Read-only permission level
+
+**write_file Tool:**
+- Input: `{ "path": string, "content": string }`
+- Atomic: writes to temp file, then renames
+- Creates parent directories automatically
+- Returns: `{ "bytes_written": N, "path": "resolved_path" }`
+- Write permission level
+
+**edit_file Tool:**
+- Input: `{ "path": string, "old_string": string, "new_string": string, "replace_all": bool? }`
+- Exact string matching (like Claude Code Edit tool)
+- Detects ambiguous matches (multiple occurrences without replace_all=true)
+- Returns: `{ "replacements": N, "path": "resolved_path" }`
+- Write permission level
+
+**apply_patch Tool:**
+- Input: `{ "patch": string }` (unified diff format)
+- Parses diff headers: `--- a/path` and `+++ b/path`
+- Applies hunks with context matching
+- Atomic: writes to temp file, then renames
+- Returns: `{ "files_modified": N, "hunks_applied": N }`
+- Write permission level
+
+**Features:**
+- All 4 tools constructed with `WorkspaceGuard` for path validation
+- Atomic writes prevent partial file corruption on crash
+- Binary file detection prevents corrupting non-text files
+- File size limits prevent memory exhaustion
+- Comprehensive error messages for path traversal, ambiguous matches, etc.
 
 #### Python Adapter (PyAdapter)
 
@@ -1110,9 +1168,8 @@ cargo test --all
 
 ---
 
-**Phase 2 Completed:** 2026-02-17
-**Plugin FFI:** libloading with double-boxing + panic isolation
-**Gateway Tests:** 20 integration tests (health, sessions, auth, rate limiting, WebSocket)
-**Plugin Trait:** Moved to operon-runtime (no circular deps)
-**Test Coverage:** 90 tests passing (22 new in Phase 2)
+**Phase 3 Completed:** 2026-02-17
+**Filesystem Tools:** WorkspaceGuard + read_file, write_file, edit_file, apply_patch with atomic writes
+**Test Coverage:** 110 tests passing (20 new filesystem tests in Phase 3, 22 new in Phase 2)
 **Code Quality:** 0 clippy warnings, 0 unsafe blocks
+**Path Security:** All filesystem ops workspace-scoped, symlink resolution, binary detection
