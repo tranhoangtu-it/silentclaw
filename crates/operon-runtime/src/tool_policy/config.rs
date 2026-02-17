@@ -48,7 +48,7 @@ fn default_true() -> bool {
 }
 
 fn default_permission() -> String {
-    "execute".to_string()
+    "read".to_string()
 }
 
 fn default_max_calls() -> u32 {

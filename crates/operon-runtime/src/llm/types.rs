@@ -41,6 +41,9 @@ pub struct ToolCall {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
     pub tool_use_id: String,
+    /// Original function name (needed by Gemini's functionResponse.name)
+    #[serde(default)]
+    pub name: String,
     pub output: String,
     pub is_error: bool,
 }
@@ -78,11 +81,12 @@ impl Message {
         }
     }
 
-    pub fn tool_result(tool_use_id: &str, output: &str, is_error: bool) -> Self {
+    pub fn tool_result(tool_use_id: &str, name: &str, output: &str, is_error: bool) -> Self {
         Self {
             role: Role::User,
             content: Content::ToolResult(ToolResult {
                 tool_use_id: tool_use_id.to_string(),
+                name: name.to_string(),
                 output: output.to_string(),
                 is_error,
             }),

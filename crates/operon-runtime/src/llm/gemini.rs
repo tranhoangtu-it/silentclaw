@@ -1,9 +1,11 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use reqwest::{Client, ClientBuilder};
+use reqwest::{Client, ClientBuilder, Response};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+use tracing::{debug, info};
 
 use super::provider::LLMProvider;
 use super::streaming::{drive_sse_stream, parse_gemini_sse};
@@ -11,6 +13,15 @@ use super::types::*;
 
 const GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 const DEFAULT_MODEL: &str = "gemini-2.0-flash";
+
+/// Global atomic counter for unique Gemini tool call IDs
+static CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Generate a unique tool call ID for Gemini responses
+pub(crate) fn next_call_id(name: &str) -> String {
+    let n = CALL_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("gemini_{}_{}", name, n)
+}
 
 /// Google Gemini API client
 pub struct GeminiClient {
@@ -134,7 +145,7 @@ impl GeminiClient {
             Content::ToolResult(tr) => {
                 json!([{
                     "functionResponse": {
-                        "name": tr.tool_use_id,
+                        "name": tr.name,
                         "response": {"result": tr.output}
                     }
                 }])
@@ -148,6 +159,12 @@ impl GeminiClient {
                             "functionCall": {
                                 "name": tc.name,
                                 "args": tc.input,
+                            }
+                        }),
+                        Content::ToolResult(tr) => json!({
+                            "functionResponse": {
+                                "name": tr.tool_use_id,
+                                "response": {"result": tr.output}
                             }
                         }),
                         _ => json!({"text": ""}),
@@ -168,6 +185,20 @@ impl GeminiClient {
         };
 
         json!({"role": role, "parts": parts})
+    }
+
+    /// Check HTTP response status and return a descriptive error with redacted API key
+    async fn check_response(&self, response: Response) -> Result<Response> {
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            return Err(anyhow!(
+                "Gemini API error ({}): {}",
+                status,
+                Self::redact_key(&error_body, &self.api_key)
+            ));
+        }
+        Ok(response)
     }
 
     fn tool_to_api(&self, tool: &ToolSchema) -> Value {
@@ -195,7 +226,7 @@ impl GeminiClient {
                     }
                     if let Some(ref fc) = part.function_call {
                         tool_calls.push(Content::ToolCall(ToolCall {
-                            id: format!("gemini_{}", fc.name),
+                            id: next_call_id(&fc.name),
                             name: fc.name.clone(),
                             input: fc.args.clone().unwrap_or(Value::Null),
                         }));
@@ -259,6 +290,8 @@ impl LLMProvider for GeminiClient {
         let body = self.build_request_body(messages, tools, config);
         let url = self.api_url(false);
 
+        debug!(model = %self.model, "Gemini generate request");
+
         let response = self
             .client
             .post(&url)
@@ -267,11 +300,8 @@ impl LLMProvider for GeminiClient {
             .send()
             .await?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let error_body = response.text().await.unwrap_or_default();
-            return Err(anyhow!("Gemini API error ({}): {}", status, Self::redact_key(&error_body, &self.api_key)));
-        }
+        let response = self.check_response(response).await?;
+        info!(model = %self.model, "Gemini generate response received");
 
         let api_response: GeminiApiResponse = response.json().await?;
         self.parse_response(&api_response)
@@ -286,6 +316,8 @@ impl LLMProvider for GeminiClient {
         let body = self.build_request_body(messages, tools, config);
         let url = self.api_url(true);
 
+        debug!(model = %self.model, "Gemini stream request");
+
         let response = self
             .client
             .post(&url)
@@ -294,11 +326,8 @@ impl LLMProvider for GeminiClient {
             .send()
             .await?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let error_body = response.text().await.unwrap_or_default();
-            return Err(anyhow!("Gemini API error ({}): {}", status, Self::redact_key(&error_body, &self.api_key)));
-        }
+        let response = self.check_response(response).await?;
+        info!(model = %self.model, "Gemini stream connected");
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
 
@@ -453,6 +482,7 @@ mod tests {
         let calls = resp.content.extract_tool_calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "shell");
+        assert!(calls[0].id.starts_with("gemini_shell_"));
     }
 
     #[test]

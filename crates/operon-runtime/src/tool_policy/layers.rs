@@ -53,13 +53,19 @@ impl PolicyLayer for ToolExistenceLayer {
 /// Hierarchy: Read < Write < Execute < Network < Admin
 pub struct PermissionCheckLayer {
     tool_permissions: HashMap<String, PermissionLevel>,
+    /// Default permission for tools not in tool_permissions map (least-privilege: Read)
+    default_permission: PermissionLevel,
     is_enabled: bool,
 }
 
 impl PermissionCheckLayer {
-    pub fn new(tool_permissions: HashMap<String, PermissionLevel>) -> Self {
+    pub fn new(
+        tool_permissions: HashMap<String, PermissionLevel>,
+        default_permission: PermissionLevel,
+    ) -> Self {
         Self {
             tool_permissions,
+            default_permission,
             is_enabled: true,
         }
     }
@@ -84,7 +90,7 @@ impl PolicyLayer for PermissionCheckLayer {
         let required = self
             .tool_permissions
             .get(&ctx.tool_name)
-            .unwrap_or(&PermissionLevel::Execute);
+            .unwrap_or(&self.default_permission);
 
         if permission_rank(&ctx.caller_permission) >= permission_rank(required) {
             PolicyDecision::Allow
@@ -359,7 +365,7 @@ mod tests {
     fn test_permission_check_allow() {
         let mut perms = HashMap::new();
         perms.insert("shell".into(), PermissionLevel::Execute);
-        let layer = PermissionCheckLayer::new(perms);
+        let layer = PermissionCheckLayer::new(perms, PermissionLevel::Read);
         let ctx = ctx_with("shell", PermissionLevel::Execute, false);
         assert!(matches!(layer.evaluate(&ctx), PolicyDecision::Allow));
     }
@@ -368,9 +374,20 @@ mod tests {
     fn test_permission_check_deny() {
         let mut perms = HashMap::new();
         perms.insert("shell".into(), PermissionLevel::Admin);
-        let layer = PermissionCheckLayer::new(perms);
+        let layer = PermissionCheckLayer::new(perms, PermissionLevel::Read);
         let ctx = ctx_with("shell", PermissionLevel::Read, false);
         assert!(matches!(layer.evaluate(&ctx), PolicyDecision::Deny(_)));
+    }
+
+    #[test]
+    fn test_permission_check_unknown_tool_defaults_to_read() {
+        let layer = PermissionCheckLayer::new(HashMap::new(), PermissionLevel::Read);
+        // Unknown tool with Read caller → allowed (Read >= Read)
+        let ctx = ctx_with("unknown_tool", PermissionLevel::Read, false);
+        assert!(matches!(layer.evaluate(&ctx), PolicyDecision::Allow));
+        // Unknown tool with Execute caller → also allowed (Execute >= Read)
+        let ctx2 = ctx_with("unknown_tool", PermissionLevel::Execute, false);
+        assert!(matches!(layer.evaluate(&ctx2), PolicyDecision::Allow));
     }
 
     // --- Rate Limit ---

@@ -371,7 +371,7 @@ pub fn parse_gemini_sse(data: &str) -> Vec<StreamChunk> {
                         }
                     }
                     if let Some(ref fc) = part.function_call {
-                        let call_id = format!("gemini_{}", fc.name);
+                        let call_id = super::gemini::next_call_id(&fc.name);
                         chunks.push(StreamChunk::ToolCallStart {
                             id: call_id.clone(),
                             name: fc.name.clone(),

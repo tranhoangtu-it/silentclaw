@@ -1,8 +1,8 @@
 # SilentClaw Codebase Summary
 
 **Generated:** 2026-02-18
-**Version:** 5.0.0-phase-5
-**Status:** Phase 5 Complete + Gemini Provider + Tool Policy Pipeline
+**Version:** 5.1.0-phase-6
+**Status:** Phase 6 Complete - Code Review Fixes (DRY, Arc pattern, policy defaults, tool IDs)
 
 ## Quick Reference
 
@@ -27,6 +27,59 @@
 | **Full-Text Search** | SQLite FTS5 with BM25 ranking and hash-based cache |
 | **Session Manager** | Race condition fixed: orphan session detection after re-insert |
 | **Health Endpoint** | Excluded from rate limiting (LB health checks not throttled) |
+
+## Phase 6 Code Review Fixes Summary
+
+**Completed Code Quality Improvements:**
+
+1. **chat.rs - Arc Pattern Refactoring**
+   - Removed `Arc::get_mut().expect()` pattern that assumed exclusive access
+   - Now builds full Runtime before wrapping in Arc
+   - Added `parse_permission_level()` helper for consistent permission parsing
+   - Cleaner builder pattern: construct → wrap in Arc → immutable access
+
+2. **runtime.rs - Dry-Run Check Reordering**
+   - Moved dry-run check BEFORE policy evaluation in `execute_tool()`
+   - Prevents rate-limit counter inflation when tools skipped in dry-run mode
+   - Policy context now respects execution context properly
+
+3. **adapters/lib.rs - Function Signature DRY Improvements**
+   - Changed `register_shell_tool()` from `&Arc<Runtime>` to `&Runtime`
+   - Changed `register_filesystem_tools()` from `&Arc<Runtime>` to `&Runtime`
+   - Simplifies caller code: no Arc dereferencing needed
+   - More flexible for future refactoring
+
+4. **gemini.rs - DRY Helper & Tracing**
+   - Added `check_response()` DRY helper to reduce response parsing duplication
+   - Added structured tracing: `debug!()` for parsing, `info!()` for API calls
+   - Global `AtomicU64 CALL_COUNTER` for unique tool call IDs per session
+   - `next_call_id()` function: `gemini_{name}_{counter}` format
+
+5. **streaming.rs - Unified Tool Call ID Generation**
+   - `parse_gemini_sse()` now calls `gemini::next_call_id()` for consistency
+   - Tool call IDs now globally unique across streaming responses
+   - Supports concurrent streaming without ID collisions
+
+6. **layers.rs - Default Permission Level**
+   - `PermissionCheckLayer` now takes `default_permission` parameter
+   - Default permission changed from Execute to Read (safer default)
+   - Config: `[tool_policy.permission] default_level = "read"` in TOML
+   - Explicit per-tool overrides remain possible
+
+7. **config.rs - Default Permission Config**
+   - `tool_policy.permission.default_level` now defaults to "read" instead of "execute"
+   - Provides safe-by-default behavior for tool policy evaluation
+   - Configurable via TOML for specific use cases
+
+8. **types.rs - ToolResult.name Field**
+   - Added `name: String` field to `ToolResult` struct (Gemini requirement)
+   - Gemini's `functionResponse` message requires the function name
+   - Field is `#[serde(default)]` for backward compatibility
+   - Populated during tool execution in streaming responses
+
+**Impact:** Better code organization, safer defaults, consistent patterns, no breaking changes
+
+---
 
 ## Phase 5 Implementation Summary
 
@@ -68,13 +121,23 @@
 - `crates/operon-runtime/src/tool_policy/layers.rs` - 7 layer implementations (~335 LOC)
 - `crates/operon-runtime/src/tool_policy/config.rs` - ToolPolicyConfig struct (~150 LOC)
 
+**Files Modified (Phase 6 - Code Review):**
+- `crates/operon-runtime/src/llm/gemini.rs` - Added check_response() DRY helper, AtomicU64 CALL_COUNTER, tracing
+- `crates/operon-runtime/src/llm/streaming.rs` - Now calls gemini::next_call_id() for unified IDs
+- `crates/operon-runtime/src/runtime.rs` - Moved dry-run check before policy evaluation in execute_tool()
+- `crates/operon-runtime/src/tool_policy/layers.rs` - PermissionCheckLayer takes default_permission parameter
+- `crates/operon-runtime/src/llm/types.rs` - Added `name` field to ToolResult struct
+- `crates/operon-adapters/src/lib.rs` - Changed register_shell_tool() and register_filesystem_tools() signatures
+- `crates/warden/src/commands/chat.rs` - Refactored Arc pattern, added parse_permission_level() helper
+- `crates/warden/src/config.rs` - Changed default_permission from "execute" to "read"
+
 **Files Modified (Phase 5):**
 - `crates/operon-runtime/src/llm/streaming.rs` - Added parse_gemini_sse() (~50 LOC added)
 - `crates/operon-runtime/src/llm/mod.rs` - Added pub mod gemini
 - `crates/operon-runtime/src/lib.rs` - Re-exported GeminiClient + tool_policy module
-- `crates/operon-runtime/src/runtime.rs` - Integrated ToolPolicyPipeline
-- `crates/warden/src/config.rs` - Added ToolPolicyConfig + gemini_api_key
-- `crates/warden/src/commands/chat.rs` - Added "gemini" provider option
+- `crates/operon-runtime/src/runtime.rs` - Integrated ToolPolicyPipeline (now updated Phase 6)
+- `crates/warden/src/config.rs` - Added ToolPolicyConfig + gemini_api_key (now updated Phase 6)
+- `crates/warden/src/commands/chat.rs` - Added "gemini" provider option (now updated Phase 6)
 
 ## Phase 4 Implementation Summary
 
@@ -881,13 +944,22 @@ See `/docs/known-limitations.md` for complete list. Key Phase 1 notes:
 
 ---
 
-**Phase 5 Completed:** 2026-02-18
+**Phase 6 Completed:** 2026-02-18
+**Improvements:**
+- Arc pattern cleanup (safer builder pattern before Arc wrapping)
+- Dry-run check reordering (prevents rate-limit inflation)
+- DRY helpers (parse_permission_level, check_response)
+- Safer defaults (permission: Read instead of Execute)
+- Unified tool call IDs (AtomicU64 counter, no collisions)
+- ToolResult.name field for Gemini functionResponse
+- Function signature simplification (&Runtime instead of &Arc<Runtime>)
+**Modified Files:** 8 files (targeted code review fixes)
+**Tests:** 132 tests (unchanged, all passing)
+**Code Quality:** 0 clippy warnings, improved patterns, DRY principles applied
+**Backward Compatibility:** Fully compatible, no breaking changes
+
+**Phase 5 Completed:** 2026-02-18 (Previous)
 **New Systems:**
 - Gemini LLM provider (third provider with SSE streaming, tool calling, vision)
 - 7-layer tool policy pipeline (authorization, validation, rate-limiting, audit)
-**New Files:** 4 new modules (~865 LOC total)
-**Modified Files:** 6 files (streaming.rs, config.rs, runtime.rs, chat.rs, etc.)
-**Tests:** 132 tests (22 new for Phase 5), 0 failures
-**Code Quality:** 0 clippy warnings, 0 unsafe blocks, trait-based design
-**Security:** Tool policy pipeline with permission check, rate limiting, input validation, audit logging
 **LLM Providers:** 3 providers (Anthropic, OpenAI, Gemini) with automatic failover

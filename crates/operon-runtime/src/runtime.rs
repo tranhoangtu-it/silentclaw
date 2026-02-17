@@ -82,7 +82,7 @@ impl Runtime {
         self
     }
 
-    /// Set tool policy pipeline (mutable reference, for use after Arc creation)
+    /// Set tool policy pipeline (mutable reference, call before Arc wrapping)
     pub fn set_policy(&mut self, pipeline: ToolPolicyPipeline) {
         self.policy = Some(pipeline);
     }
@@ -351,6 +351,16 @@ impl Runtime {
 
     /// Execute a single tool by name (used by Agent loop)
     pub async fn execute_tool(&self, tool_name: &str, input: Value) -> Result<Value> {
+        // Dry-run check BEFORE policy evaluation to avoid incrementing rate-limit counters
+        if self.dry_run {
+            warn!(tool = tool_name, "DRY-RUN: Skipping tool execution");
+            return Ok(serde_json::json!({
+                "dry_run": true,
+                "tool": tool_name,
+                "message": "Skipped in dry-run mode"
+            }));
+        }
+
         // Policy pipeline evaluation (if configured)
         if let Some(ref policy) = self.policy {
             let ctx = PolicyContext {
@@ -367,15 +377,6 @@ impl Runtime {
             .tools
             .get(tool_name)
             .ok_or_else(|| anyhow::anyhow!("Tool '{}' not registered", tool_name))?;
-
-        if self.dry_run {
-            warn!(tool = tool_name, "DRY-RUN: Skipping tool execution");
-            return Ok(serde_json::json!({
-                "dry_run": true,
-                "tool": tool_name,
-                "message": "Skipped in dry-run mode"
-            }));
-        }
 
         let timeout = self.get_timeout(tool_name);
         let result = match tokio::time::timeout(timeout, tool.execute(input)).await {

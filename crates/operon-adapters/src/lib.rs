@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 /// Register shell tool on the runtime if enabled.
 pub fn register_shell_tool(
-    runtime: &Arc<Runtime>,
+    runtime: &Runtime,
     dry_run: bool,
     blocklist: Vec<String>,
     allowlist: Vec<String>,
@@ -35,7 +35,7 @@ pub fn register_shell_tool(
 
 /// Register all filesystem tools (read, write, edit, patch) on the runtime.
 pub fn register_filesystem_tools(
-    runtime: &Arc<Runtime>,
+    runtime: &Runtime,
     workspace: PathBuf,
     max_file_size_mb: u64,
 ) -> Result<()> {

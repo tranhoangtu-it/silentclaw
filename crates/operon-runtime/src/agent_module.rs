@@ -302,6 +302,7 @@ impl Agent {
             {
                 Ok(value) => ToolResult {
                     tool_use_id: call.id.clone(),
+                    name: call.name.clone(),
                     output: value.to_string(),
                     is_error: false,
                 },
@@ -309,6 +310,7 @@ impl Agent {
                     warn!(tool = %call.name, error = %e, "Tool execution failed");
                     ToolResult {
                         tool_use_id: call.id.clone(),
+                        name: call.name.clone(),
                         output: format!("Error: {}", e),
                         is_error: true,
                     }

@@ -4,7 +4,8 @@ use anyhow::{anyhow, Result};
 use operon_adapters::{register_filesystem_tools, register_shell_tool, MemorySearchTool};
 use operon_runtime::{
     Agent, AgentConfig, AnthropicClient, ConfigManager, ConfigReloadEvent, GeminiClient,
-    LLMProvider, OpenAIClient, ProviderChain, Runtime, SessionStore, ToolPolicyPipeline,
+    LLMProvider, OpenAIClient, PermissionLevel, ProviderChain, Runtime, SessionStore,
+    ToolPolicyPipeline,
 };
 use operon_runtime::tool_policy::layers::{
     AuditLogLayer, DryRunGuardLayer, InputValidationLayer, PermissionCheckLayer, RateLimitLayer,
@@ -37,9 +38,9 @@ pub async fn execute(
         ExecutionMode::Execute => false,
     };
 
-    // Create runtime and register tools
+    // Create runtime and register tools (build fully before Arc wrapping)
     let default_timeout = Duration::from_secs(config.runtime.timeout_secs);
-    let mut runtime = Arc::new(Runtime::new(dry_run, default_timeout)?);
+    let mut runtime = Runtime::new(dry_run, default_timeout)?;
 
     if config.tools.shell.enabled {
         register_shell_tool(
@@ -95,15 +96,17 @@ pub async fn execute(
         }
     }
 
-    // Build tool policy pipeline if enabled
+    // Build tool policy pipeline if enabled (before Arc wrapping)
     if config.tool_policy.enabled {
         let tool_names = runtime.tool_names();
         let mut pipeline = ToolPolicyPipeline::new()
             .add_layer(Box::new(ToolExistenceLayer::new(tool_names)));
 
         if config.tool_policy.permission_enabled {
+            let default_perm = parse_permission_level(&config.tool_policy.default_permission);
             pipeline = pipeline.add_layer(Box::new(PermissionCheckLayer::new(
-                HashMap::new(), // Use default per-tool permissions
+                HashMap::new(),
+                default_perm,
             )));
         }
 
@@ -131,13 +134,12 @@ pub async fn execute(
 
         pipeline = pipeline.add_layer(Box::new(TimeoutEnforceLayer::new()));
 
-        // set_policy requires &mut, so get_mut from Arc
-        Arc::get_mut(&mut runtime)
-            .expect("Runtime should have single owner at this point")
-            .set_policy(pipeline);
-
+        runtime.set_policy(pipeline);
         info!("Tool policy pipeline enabled");
     }
+
+    // All setup done — now wrap in Arc
+    let runtime = Arc::new(runtime);
 
     // Build agent config
     let agent_config = AgentConfig {
@@ -327,4 +329,16 @@ fn dirs_home() -> std::path::PathBuf {
     std::env::var("HOME")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from("."))
+}
+
+/// Parse permission level string from config to enum (defaults to Read for safety)
+fn parse_permission_level(s: &str) -> PermissionLevel {
+    match s.to_lowercase().as_str() {
+        "read" => PermissionLevel::Read,
+        "write" => PermissionLevel::Write,
+        "execute" => PermissionLevel::Execute,
+        "network" => PermissionLevel::Network,
+        "admin" => PermissionLevel::Admin,
+        _ => PermissionLevel::Read,
+    }
 }

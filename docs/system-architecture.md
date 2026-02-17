@@ -1,8 +1,8 @@
 # SilentClaw System Architecture
 
 **Last Updated:** 2026-02-18
-**Version:** 5.0.0-phase-5
-**Status:** Phase 5 Complete - Gemini Provider + Tool Policy Pipeline
+**Version:** 5.1.0-phase-6
+**Status:** Phase 6 Complete - Code Review Fixes (Patterns, Defaults, DRY)
 
 ## Overview
 
@@ -296,7 +296,56 @@ Use cases:
 - Rate limiting
 - Caching strategy
 
-### Layer 6: Plugin System with FFI (Enhanced - Phase 2)
+### Layer 6: Gemini Provider Streaming Enhancements (Phase 6)
+
+**Tool Call ID Generation (Phase 6 Improvement):**
+
+Added AtomicU64-based counter for globally unique tool call IDs:
+
+```rust
+static CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+pub fn next_call_id(name: &str) -> String {
+    let n = CALL_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("gemini_{}_{}", name, n)
+}
+```
+
+**Benefits:**
+- Prevents tool call ID collisions in streaming responses
+- Works across concurrent streaming requests
+- Minimal contention (atomic, no locks)
+- Unique within runtime session
+
+**Integration with Streaming:**
+- `parse_gemini_sse()` calls `gemini::next_call_id()` for each tool call
+- Consistent ID format across all Gemini responses
+- Enables reliable tool result matching
+
+**Response Validation (Phase 6 DRY):**
+
+Added `check_response()` helper to reduce duplication:
+
+```rust
+fn check_response(response: Response) -> Result<String> {
+    if response.status().is_success() {
+        response.text().await
+    } else {
+        Err(response.error_for_status()?)
+    }
+}
+```
+
+Applied in both streaming and non-streaming paths.
+
+**Structured Logging (Phase 6):**
+- `debug!()` for SSE parsing steps
+- `info!()` for API requests and responses
+- Fields: model, tool names, stream flag
+
+---
+
+### Layer 7: Plugin System with FFI (Enhanced - Phase 2)
 
 **Purpose:** Dynamic native plugin loading with safe FFI boundary
 
@@ -473,7 +522,7 @@ pub async fn start_server(
 - Wired into Axum router middleware (now active)
 - Returns 429 Too Many Requests when limited
 
-### Layer 7: Tool Policy Pipeline (NEW - Phase 5)
+### Layer 8: Tool Policy Pipeline (Phase 6 Enhanced Defaults)
 
 **Purpose:** 7-layer authorization/validation pipeline executed before every tool.execute() call
 
@@ -518,9 +567,11 @@ tool.execute(input)  // Only if all layers Allow
 1. **ToolExistence** - Validates tool is registered in runtime
    - Deny: "tool not found: {name}"
 
-2. **PermissionCheck** - Hierarchical permission enforcement
+2. **PermissionCheck** - Hierarchical permission enforcement (Phase 6: safer default)
    - Hierarchy: Read < Write < Execute < Network < Admin
+   - Default changed from Execute to Read (safer default, Phase 6)
    - Deny: "insufficient permission for tool {name}"
+   - Parameter: `default_permission` passed to layer constructor
 
 3. **RateLimit** - Token bucket per tool
    - DashMap-based concurrent tracking
@@ -545,14 +596,14 @@ tool.execute(input)  // Only if all layers Allow
    - Sets per-tool timeout metadata
    - Consumed by runtime during execution
 
-**Configuration:**
+**Configuration (Phase 6: safer defaults):**
 ```toml
 [tool_policy]
 enabled = true
 
 [tool_policy.permission]
 enabled = true
-default_level = "execute"
+default_level = "read"  # Phase 6: Changed from "execute" to "read" for safety
 
 [tool_policy.rate_limit]
 enabled = false
@@ -579,7 +630,37 @@ enabled = true
 
 **Tests:** 12 tests (3 pipeline orchestration + 9 individual layer tests)
 
-### Layer 8: Core Runtime (operon-runtime)
+### Layer 8: Core Runtime Execution Order (Phase 6 Improved)
+
+**Tool Execution Flow (Phase 6 - Reordered for Correctness):**
+
+```
+Agent calls runtime.execute_tool(name, input)
+    ↓
+[Phase 6] Check if dry_run=true FIRST (before policy evaluation)
+    ├─ If dry_run: skip execution, don't evaluate policy
+    └─ If execute: proceed to policy pipeline
+    ↓
+ToolPolicyPipeline::evaluate(context) [only if not dry-run]
+    ├── Layer 1: ToolExistence
+    ├── Layer 2: PermissionCheck (with safe default "read")
+    ├── Layer 3: RateLimit
+    ├── Layer 4: InputValidation
+    ├── Layer 5: DryRunGuard (redundant now, but kept for defense-in-depth)
+    ├── Layer 6: AuditLog
+    └── Layer 7: TimeoutEnforce
+    ↓
+tool.execute(input)
+```
+
+**Why This Matters (Phase 6):**
+- Dry-run skip prevents rate-limit counter inflation
+- Tools never penalized for skipped executions
+- Policy context reflects actual execution state
+
+---
+
+### Layer 9: Core Runtime (operon-runtime)
 
 **Purpose:** Async Tool trait and orchestration engine with policy integration
 
@@ -616,7 +697,7 @@ enabled = true
 - **No unsafe blocks:** Type safety throughout
 - **Dry-run default:** Configuration enables user choice
 
-### Layer 9: Memory & Search System (NEW - Phase 4)
+### Layer 10: Memory & Search System (Phase 4)
 
 **Purpose:** Workspace file indexing and semantic/full-text search for agent memory
 
@@ -717,11 +798,11 @@ Excluded: hidden files, node_modules/, target/, __pycache__/, binary files
 
 ---
 
-### Layer 9: Memory Search Tool (operon-adapters)
+### Layer 10: Memory Search Tool (operon-adapters)
 
-**Purpose:** LLM-callable interface for workspace file search (see Layer 9 Memory System above for backend details)
+**Purpose:** LLM-callable interface for workspace file search (see Layer 10 Memory System above for backend details)
 
-### Layer 10: Tool Adapters (operon-adapters)
+### Layer 11: Tool Adapters (operon-adapters - Phase 6 Enhanced)
 
 **Purpose:** Bridge Rust runtime with external tools and filesystem operations
 
@@ -811,23 +892,28 @@ Extracted unified diff parsing into dedicated module for reusability and single 
 - File size limits prevent memory exhaustion
 - Comprehensive error messages for path traversal, ambiguous matches, etc.
 
-**Tool Registration (H3: Deduplication)**
-New helper functions in `operon-adapters/src/lib.rs`:
+**Tool Registration (Phase 6: Simplified Signatures)**
+Updated helper functions in `operon-adapters/src/lib.rs`:
 ```rust
 pub fn register_shell_tool(
-    runtime: &Arc<Runtime>,
+    runtime: &Runtime,  // Phase 6: Changed from &Arc<Runtime>
     dry_run: bool,
     blocklist: Vec<String>,
     allowlist: Vec<String>,
 ) -> Result<()>
 
 pub fn register_filesystem_tools(
-    runtime: &Arc<Runtime>,
+    runtime: &Runtime,  // Phase 6: Changed from &Arc<Runtime>
     workspace: PathBuf,
     max_file_size_mb: u64,
 ) -> Result<()>
 ```
-Eliminates duplication in `chat.rs` and `serve.rs` (was ~20 lines each).
+
+**Phase 6 Improvement:**
+- Simplified function signatures: `&Runtime` instead of `&Arc<Runtime>`
+- No Arc dereferencing needed in callers
+- More flexible for future refactoring
+- Eliminates duplication in `chat.rs` and `serve.rs` (was ~20 lines each)
 
 #### Python Adapter (PyAdapter)
 
@@ -867,7 +953,7 @@ Eliminates duplication in `chat.rs` and `serve.rs` (was ~20 lines each).
 - Timeout enforcement prevents runaway processes
 - Error handling for non-zero exit codes
 
-### Layer 11: CLI Interface (warden - Hardened)
+### Layer 12: CLI Interface (warden - Phase 6 Refactored)
 
 **Purpose:** Entry point for all SilentClaw modes with config validation
 
@@ -877,10 +963,11 @@ Eliminates duplication in `chat.rs` and `serve.rs` (was ~20 lines each).
    - `--record <dir>` - Save fixture for replay
    - `--replay <dir>` - Skip tool execution, use recorded results
 
-2. **chat** - Interactive agent conversation (Phase 1: uses streaming)
+2. **chat** - Interactive agent conversation (Phase 1: uses streaming, Phase 6: refactored Arc pattern)
    - `--agent <name>` - Agent config
    - `--session <id>` - Resume existing session
    - REPL loop: read user input → agent loop → display response
+   - Phase 6: Build Runtime before Arc wrapping (safer builder pattern)
 
 3. **serve** - Gateway HTTP/WebSocket server (Phase 1: with hot-reload)
    - `--host <addr>` - Bind address (default: 127.0.0.1)
