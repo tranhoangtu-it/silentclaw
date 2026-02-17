@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 use super::provider::LLMProvider;
+use super::streaming::{drive_sse_stream, parse_openai_sse};
 use super::types::*;
 
 const OPENAI_API_URL: &str = "https://api.openai.com/v1/chat/completions";
@@ -55,6 +56,7 @@ impl OpenAIClient {
         messages: &[Message],
         tools: &[ToolSchema],
         config: &GenerateConfig,
+        stream: bool,
     ) -> Value {
         let model = if config.model.is_empty() {
             &self.model
@@ -70,6 +72,10 @@ impl OpenAIClient {
             "temperature": config.temperature,
             "messages": api_messages,
         });
+
+        if stream {
+            body["stream"] = json!(true);
+        }
 
         if !tools.is_empty() {
             let api_tools: Vec<Value> = tools.iter().map(|t| self.tool_to_api(t)).collect();
@@ -253,7 +259,7 @@ impl LLMProvider for OpenAIClient {
         tools: &[ToolSchema],
         config: &GenerateConfig,
     ) -> Result<GenerateResponse> {
-        let body = self.build_request_body(messages, tools, config);
+        let body = self.build_request_body(messages, tools, config, false);
 
         let response = self
             .client
@@ -272,6 +278,38 @@ impl LLMProvider for OpenAIClient {
 
         let api_response: ApiResponse = response.json().await?;
         self.parse_response(&api_response)
+    }
+
+    async fn generate_stream(
+        &self,
+        messages: &[Message],
+        tools: &[ToolSchema],
+        config: &GenerateConfig,
+    ) -> Result<tokio::sync::mpsc::Receiver<StreamChunk>> {
+        let body = self.build_request_body(messages, tools, config, true);
+
+        let response = self
+            .client
+            .post(self.api_url())
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            return Err(anyhow!("OpenAI API error ({}): {}", status, error_body));
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+
+        tokio::spawn(async move {
+            drive_sse_stream(response.bytes_stream(), parse_openai_sse, tx).await;
+        });
+
+        Ok(rx)
     }
 
     fn supports_vision(&self) -> bool {
@@ -335,12 +373,23 @@ mod tests {
             ..Default::default()
         };
 
-        let body = client.build_request_body(&messages, &[], &config);
+        let body = client.build_request_body(&messages, &[], &config, false);
 
         // System prompt is first message
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["messages"][0]["content"], "Be helpful");
         assert_eq!(body["messages"][1]["role"], "user");
+        assert!(body.get("stream").is_none());
+    }
+
+    #[test]
+    fn test_build_request_body_streaming() {
+        let client = OpenAIClient::new("test-key");
+        let messages = vec![Message::user("Hello")];
+        let config = GenerateConfig::default();
+
+        let body = client.build_request_body(&messages, &[], &config, true);
+        assert_eq!(body["stream"], true);
     }
 
     #[test]
@@ -399,7 +448,11 @@ mod tests {
 
     #[test]
     fn test_custom_base_url() {
-        let client = OpenAIClient::new("key").with_base_url("http://localhost:11434/v1/chat/completions");
-        assert_eq!(client.api_url(), "http://localhost:11434/v1/chat/completions");
+        let client =
+            OpenAIClient::new("key").with_base_url("http://localhost:11434/v1/chat/completions");
+        assert_eq!(
+            client.api_url(),
+            "http://localhost:11434/v1/chat/completions"
+        );
     }
 }

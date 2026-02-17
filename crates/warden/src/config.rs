@@ -137,6 +137,24 @@ impl Default for PythonConfig {
 }
 
 impl Config {
+    /// Create a default config (used as initial value for ConfigManager)
+    pub fn default_config() -> Self {
+        Self {
+            version: default_config_version(),
+            runtime: RuntimeConfig {
+                dry_run: default_dry_run(),
+                timeout_secs: default_timeout(),
+                max_parallel: default_max_parallel(),
+            },
+            tools: ToolsConfig {
+                shell: ShellConfig::default(),
+                python: PythonConfig::default(),
+                timeouts: HashMap::new(),
+            },
+            llm: LlmConfig::default(),
+        }
+    }
+
     /// Validate configuration values
     pub fn validate(&self) -> Result<()> {
         if self.runtime.timeout_secs == 0 {
@@ -194,20 +212,7 @@ pub fn load_config(path: Option<&Path>) -> Result<Config> {
 
         toml::from_str(&content).context("Failed to parse TOML config")?
     } else {
-        Config {
-            version: default_config_version(),
-            runtime: RuntimeConfig {
-                dry_run: default_dry_run(),
-                timeout_secs: default_timeout(),
-                max_parallel: default_max_parallel(),
-            },
-            tools: ToolsConfig {
-                shell: ShellConfig::default(),
-                python: PythonConfig::default(),
-                timeouts: HashMap::new(),
-            },
-            llm: LlmConfig::default(),
-        }
+        Config::default_config()
     };
 
     // Apply environment variable overrides

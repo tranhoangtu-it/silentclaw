@@ -14,12 +14,19 @@ pub enum Role {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Content {
-    Text { text: String },
-    Image { data: Vec<u8>, mime: String },
+    Text {
+        text: String,
+    },
+    Image {
+        data: Vec<u8>,
+        mime: String,
+    },
     ToolCall(ToolCall),
     ToolResult(ToolResult),
     /// Mixed content blocks (assistant can return text + tool calls)
-    Mixed { parts: Vec<Content> },
+    Mixed {
+        parts: Vec<Content>,
+    },
 }
 
 /// Tool call request from LLM

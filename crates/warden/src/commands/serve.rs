@@ -4,16 +4,19 @@ use crate::config::Config;
 use anyhow::Result;
 use operon_adapters::ShellTool;
 use operon_gateway::{start_server, AppState, AuthConfig, RateLimiter, SessionManager};
-use operon_runtime::Runtime;
+use operon_runtime::{ConfigManager, ConfigReloadEvent, Runtime};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
 
+/// Execute serve command with optional config file path for hot-reload
 pub async fn execute(
     host: String,
     port: u16,
     execution_mode: ExecutionMode,
     config: &Config,
+    config_path: Option<PathBuf>,
 ) -> Result<()> {
     info!(host = %host, port, "Starting gateway server");
 
@@ -34,6 +37,37 @@ pub async fn execute(
             config.tools.shell.allowlist.clone(),
         );
         runtime.register_tool("shell".to_string(), Arc::new(shell_tool))?;
+    }
+
+    // Start config hot-reload watcher if config path is provided
+    if let Some(ref path) = config_path {
+        let config_manager = ConfigManager::<Config>::new(path.clone(), Config::default_config());
+        let mut reload_rx = config_manager.subscribe_reload();
+
+        // Spawn watcher
+        let watcher_handle = tokio::spawn({
+            let cm = config_manager;
+            async move {
+                if let Err(e) = cm.watch().await {
+                    tracing::error!("Config watcher failed: {}", e);
+                }
+            }
+        });
+
+        // Spawn reload listener
+        tokio::spawn(async move {
+            while let Ok(event) = reload_rx.recv().await {
+                match event {
+                    ConfigReloadEvent::Success => {
+                        info!("Config file reloaded successfully (note: runtime provider swap not yet implemented)");
+                    }
+                    ConfigReloadEvent::Failure(err) => {
+                        tracing::warn!("Config reload failed: {}. Old config preserved.", err);
+                    }
+                }
+            }
+            drop(watcher_handle);
+        });
     }
 
     let session_manager = Arc::new(SessionManager::new(provider, runtime));

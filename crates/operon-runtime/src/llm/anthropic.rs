@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 use super::provider::LLMProvider;
+use super::streaming::{drive_sse_stream, parse_anthropic_sse};
 use super::types::*;
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
@@ -44,6 +45,7 @@ impl AnthropicClient {
         messages: &[Message],
         tools: &[ToolSchema],
         config: &GenerateConfig,
+        stream: bool,
     ) -> Value {
         let model = if config.model.is_empty() {
             &self.model
@@ -57,12 +59,14 @@ impl AnthropicClient {
             "temperature": config.temperature,
         });
 
-        // Extract system prompt
+        if stream {
+            body["stream"] = json!(true);
+        }
+
         if let Some(ref sys) = config.system_prompt {
             body["system"] = json!(sys);
         }
 
-        // Convert messages to Anthropic format (skip system messages)
         let api_messages: Vec<Value> = messages
             .iter()
             .filter(|m| m.role != Role::System)
@@ -70,7 +74,6 @@ impl AnthropicClient {
             .collect();
         body["messages"] = json!(api_messages);
 
-        // Add tools if provided
         if !tools.is_empty() {
             let api_tools: Vec<Value> = tools.iter().map(|t| self.tool_to_api(t)).collect();
             body["tools"] = json!(api_tools);
@@ -79,12 +82,11 @@ impl AnthropicClient {
         body
     }
 
-    /// Convert internal Message to Anthropic API format
     fn message_to_api(&self, msg: &Message) -> Value {
         let role = match msg.role {
             Role::User => "user",
             Role::Assistant => "assistant",
-            Role::System => "user", // filtered out above, fallback
+            Role::System => "user",
         };
 
         let content = match &msg.content {
@@ -138,7 +140,6 @@ impl AnthropicClient {
         json!({ "role": role, "content": content })
     }
 
-    /// Convert ToolSchema to Anthropic API format
     fn tool_to_api(&self, tool: &ToolSchema) -> Value {
         json!({
             "name": tool.name,
@@ -147,7 +148,6 @@ impl AnthropicClient {
         })
     }
 
-    /// Parse Anthropic API response into GenerateResponse
     fn parse_response(&self, body: &ApiResponse) -> Result<GenerateResponse> {
         let mut text_parts = Vec::new();
         let mut tool_calls = Vec::new();
@@ -156,9 +156,7 @@ impl AnthropicClient {
             match block.block_type.as_str() {
                 "text" => {
                     if let Some(ref text) = block.text {
-                        text_parts.push(Content::Text {
-                            text: text.clone(),
-                        });
+                        text_parts.push(Content::Text { text: text.clone() });
                     }
                 }
                 "tool_use" => {
@@ -172,7 +170,6 @@ impl AnthropicClient {
             }
         }
 
-        // Combine text and tool calls
         let mut parts = text_parts;
         parts.extend(tool_calls);
 
@@ -208,7 +205,7 @@ impl LLMProvider for AnthropicClient {
         tools: &[ToolSchema],
         config: &GenerateConfig,
     ) -> Result<GenerateResponse> {
-        let body = self.build_request_body(messages, tools, config);
+        let body = self.build_request_body(messages, tools, config, false);
 
         let response = self
             .client
@@ -223,15 +220,77 @@ impl LLMProvider for AnthropicClient {
         let status = response.status();
         if !status.is_success() {
             let error_body = response.text().await.unwrap_or_default();
-            return Err(anyhow!(
-                "Anthropic API error ({}): {}",
-                status,
-                error_body
-            ));
+            return Err(anyhow!("Anthropic API error ({}): {}", status, error_body));
         }
 
         let api_response: ApiResponse = response.json().await?;
         self.parse_response(&api_response)
+    }
+
+    async fn generate_stream(
+        &self,
+        messages: &[Message],
+        tools: &[ToolSchema],
+        config: &GenerateConfig,
+    ) -> Result<tokio::sync::mpsc::Receiver<StreamChunk>> {
+        let body = self.build_request_body(messages, tools, config, true);
+
+        let response = self
+            .client
+            .post(ANTHROPIC_API_URL)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response.text().await.unwrap_or_default();
+            return Err(anyhow!("Anthropic API error ({}): {}", status, error_body));
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
+
+        tokio::spawn({
+            let byte_stream = response.bytes_stream();
+            async move {
+                let mut current_tool_id = String::new();
+                drive_sse_stream(
+                    byte_stream,
+                    |data: &str| -> Vec<StreamChunk> {
+                        match parse_anthropic_sse(data) {
+                            Some(mut chunk) => {
+                                match &chunk {
+                                    StreamChunk::ToolCallStart { id, .. } => {
+                                        current_tool_id = id.clone();
+                                    }
+                                    StreamChunk::ToolCallDelta { id, .. } if id.is_empty() => {
+                                        chunk = StreamChunk::ToolCallDelta {
+                                            id: current_tool_id.clone(),
+                                            input_delta: match chunk {
+                                                StreamChunk::ToolCallDelta {
+                                                    input_delta, ..
+                                                } => input_delta,
+                                                _ => unreachable!(),
+                                            },
+                                        };
+                                    }
+                                    _ => {}
+                                }
+                                vec![chunk]
+                            }
+                            None => vec![],
+                        }
+                    },
+                    tx,
+                )
+                .await;
+            }
+        });
+
+        Ok(rx)
     }
 
     fn supports_vision(&self) -> bool {
@@ -243,7 +302,6 @@ impl LLMProvider for AnthropicClient {
     }
 }
 
-/// Anthropic API response structures
 #[derive(Debug, Deserialize)]
 struct ApiResponse {
     model: String,
@@ -268,7 +326,6 @@ struct ApiUsage {
     output_tokens: u32,
 }
 
-/// Check if an error is retryable (rate limit, server error)
 pub fn is_retryable_status(status: u16) -> bool {
     status == 429 || status == 529 || (500..600).contains(&status)
 }
@@ -286,11 +343,22 @@ mod tests {
             ..Default::default()
         };
 
-        let body = client.build_request_body(&messages, &[], &config);
+        let body = client.build_request_body(&messages, &[], &config, false);
 
         assert_eq!(body["system"], "You are helpful");
         assert_eq!(body["messages"][0]["role"], "user");
         assert_eq!(body["max_tokens"], 4096);
+        assert!(body.get("stream").is_none());
+    }
+
+    #[test]
+    fn test_build_request_body_streaming() {
+        let client = AnthropicClient::new("test-key");
+        let messages = vec![Message::user("Hello")];
+        let config = GenerateConfig::default();
+
+        let body = client.build_request_body(&messages, &[], &config, true);
+        assert_eq!(body["stream"], true);
     }
 
     #[test]

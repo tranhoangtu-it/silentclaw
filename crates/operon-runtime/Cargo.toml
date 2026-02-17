@@ -24,6 +24,7 @@ libloading = "0.8"
 base64 = "0.22"
 eventsource-stream = "0.2"
 pin-project-lite = "0.2"
+bytes = "1.11.1"
 
 [dev-dependencies]
 tempfile = "3"

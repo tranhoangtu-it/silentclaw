@@ -3,19 +3,22 @@ use crate::config::Config;
 use anyhow::{anyhow, Result};
 use operon_adapters::ShellTool;
 use operon_runtime::{
-    Agent, AgentConfig, AnthropicClient, LLMProvider, OpenAIClient, ProviderChain, Runtime,
-    SessionStore,
+    Agent, AgentConfig, AnthropicClient, ConfigManager, ConfigReloadEvent, LLMProvider,
+    OpenAIClient, ProviderChain, Runtime, SessionStore,
 };
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
 
+/// Execute chat command with optional config file path for hot-reload
 pub async fn execute(
     agent_name: String,
     session_id: Option<String>,
     execution_mode: ExecutionMode,
     config: &Config,
+    config_path: Option<PathBuf>,
 ) -> Result<()> {
     info!(agent = %agent_name, "Starting chat session");
 
@@ -49,17 +52,50 @@ pub async fn execute(
     };
 
     // Create or resume agent
-    let session_store = SessionStore::new(
-        dirs_home().join(".silentclaw").join("sessions"),
-    )?;
+    let session_store = SessionStore::new(dirs_home().join(".silentclaw").join("sessions"))?;
 
     let mut agent = if let Some(ref sid) = session_id {
         let session = session_store.load(sid).await?;
-        info!(session_id = sid, messages = session.message_count(), "Resumed session");
+        info!(
+            session_id = sid,
+            messages = session.message_count(),
+            "Resumed session"
+        );
         Agent::new(agent_config, provider, runtime).with_session(session)
     } else {
         Agent::new(agent_config, provider, runtime)
     };
+
+    // Start config hot-reload watcher if config path is provided
+    if let Some(ref path) = config_path {
+        let config_manager = ConfigManager::<Config>::new(path.clone(), Config::default_config());
+        let mut reload_rx = config_manager.subscribe_reload();
+
+        // Spawn watcher
+        let watcher_handle = tokio::spawn({
+            let cm = config_manager;
+            async move {
+                if let Err(e) = cm.watch().await {
+                    tracing::error!("Config watcher failed: {}", e);
+                }
+            }
+        });
+
+        // Spawn reload listener
+        tokio::spawn(async move {
+            while let Ok(event) = reload_rx.recv().await {
+                match event {
+                    ConfigReloadEvent::Success => {
+                        info!("Config file reloaded successfully (note: runtime provider swap not yet implemented)");
+                    }
+                    ConfigReloadEvent::Failure(err) => {
+                        tracing::warn!("Config reload failed: {}. Old config preserved.", err);
+                    }
+                }
+            }
+            drop(watcher_handle);
+        });
+    }
 
     println!("SilentClaw Agent [{}] - Type 'exit' to quit", agent_name);
     println!("Session: {}", agent.session.id);

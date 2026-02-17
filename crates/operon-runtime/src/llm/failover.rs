@@ -146,6 +146,41 @@ impl LLMProvider for ProviderChain {
         Err(last_error.unwrap_or_else(|| anyhow!("All LLM providers failed")))
     }
 
+    async fn generate_stream(
+        &self,
+        messages: &[Message],
+        tools: &[ToolSchema],
+        config: &GenerateConfig,
+    ) -> Result<tokio::sync::mpsc::Receiver<StreamChunk>> {
+        let available = self.available_providers().await;
+
+        if available.is_empty() {
+            return Err(anyhow!("All LLM providers have exceeded failure threshold"));
+        }
+
+        // Try each available provider (no retry for streaming - reconnect is complex)
+        let mut last_error = None;
+        for provider in &available {
+            match provider.generate_stream(messages, tools, config).await {
+                Ok(rx) => {
+                    self.reset_failures(provider.model_name()).await;
+                    return Ok(rx);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        provider = provider.model_name(),
+                        error = %e,
+                        "Streaming request failed, trying next provider"
+                    );
+                    self.track_failure(provider.model_name()).await;
+                    last_error = Some(e);
+                }
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| anyhow!("All LLM providers failed for streaming")))
+    }
+
     fn supports_vision(&self) -> bool {
         self.providers.iter().any(|p| p.supports_vision())
     }
@@ -163,10 +198,11 @@ fn parse_retry_delay(error: &str) -> Duration {
     // Check for "retry-after: N" in error text
     if let Some(idx) = error.to_lowercase().find("retry-after") {
         let rest = &error[idx..];
-        if let Some(secs) = rest
-            .split_whitespace()
-            .find_map(|s| s.trim_matches(|c: char| !c.is_ascii_digit()).parse::<u64>().ok())
-        {
+        if let Some(secs) = rest.split_whitespace().find_map(|s| {
+            s.trim_matches(|c: char| !c.is_ascii_digit())
+                .parse::<u64>()
+                .ok()
+        }) {
             return Duration::from_secs(secs.min(300)); // Cap at 5 min
         }
     }
@@ -289,5 +325,30 @@ mod tests {
             .await;
 
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_stream_failover() {
+        let chain = ProviderChain::new(vec![Arc::new(MockProvider {
+            name: "primary".into(),
+            should_fail: false,
+            retryable: false,
+        })]);
+
+        // Default generate_stream uses fallback (wraps generate)
+        let rx = chain
+            .generate_stream(&[Message::user("Hi")], &[], &GenerateConfig::default())
+            .await
+            .unwrap();
+
+        // Should receive at least TextDelta + Done
+        let mut chunks = Vec::new();
+        let mut rx = rx;
+        while let Some(chunk) = rx.recv().await {
+            chunks.push(chunk);
+        }
+        assert!(chunks.len() >= 2);
+        assert!(matches!(&chunks[0], StreamChunk::TextDelta(_)));
+        assert!(matches!(chunks.last().unwrap(), StreamChunk::Done { .. }));
     }
 }
